@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"time"
 
 	"github.com/AarinB1/flakescope/internal/report"
@@ -113,7 +114,13 @@ func run(args []string, stdout, stderr io.Writer, exec executor) int {
 	}
 
 	base := runner.Default()
-	results := exec(context.Background(), opts, runner.Matrix(base, opts.runs))
+	// Setpgid puts each `go test` in its own process group so a timeout can
+	// SIGKILL the test binary, not just the go tool. That also isolates those
+	// processes from a terminal SIGINT, so this context must cancel on
+	// interrupt or the binaries keep running after flakescope itself exits.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	results := exec(ctx, opts, runner.Matrix(base, opts.runs))
 	rep := report.Build(opts.pkg, base, results)
 
 	if opts.jsonOut {

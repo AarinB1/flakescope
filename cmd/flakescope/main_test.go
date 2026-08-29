@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -253,6 +254,59 @@ func TestRunJSONOutput(t *testing.T) {
 		if !seen[name] {
 			t.Errorf("%s missing from the JSON report", name)
 		}
+	}
+}
+
+// TestRunCancelsOnInterrupt is the fixture that breaks a CLI which still
+// runs against context.Background() after Setpgid isolated the children.
+// Without NotifyContext, SIGINT never reaches the executor; the test
+// binaries would stay alive after flakescope itself died.
+func TestRunCancelsOnInterrupt(t *testing.T) {
+	// Own SIGINT first so a missing notify fails this test instead of
+	// killing the process under test.
+	ignored := make(chan os.Signal, 1)
+	signal.Notify(ignored, os.Interrupt)
+	t.Cleanup(func() { signal.Stop(ignored) })
+
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	exec := func(ctx context.Context, _ options, configs []runner.Config) []runner.Result {
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+		return make([]runner.Result, len(configs))
+	}
+
+	done := make(chan int, 1)
+	go func() {
+		var stdout, stderr strings.Builder
+		done <- run([]string{"--runs", "1", fixturePkg}, &stdout, &stderr, exec)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run never reached the executor")
+	}
+
+	proc, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := proc.Signal(os.Interrupt); err != nil {
+		t.Skipf("cannot send interrupt: %v", err)
+	}
+
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("interrupt did not cancel the executor context")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not return after the executor finished")
 	}
 }
 
