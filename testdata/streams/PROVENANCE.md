@@ -12,6 +12,8 @@ on linux/amd64. Each command was run from the repository root with
 | `loadfail.json`  | `GOMAXPROCS=4 go test -count=1 -json $P`                                                  | The load-dependent failure, plus the always-failing test. |
 | `panic.json`     | `GOMAXPROCS=1 go test -count=1 -json -run 'TestAlwaysPasses\|TestPanics\|TestLoadDependent' $P` | A panic. The test binary dies mid-run, so the package-level `fail` carries no `Test` field. |
 | `buildfail.json` | `GOMAXPROCS=1 go test -count=1 -json $P`                                                  | A compile error. Every event is package-scoped; the build events carry `ImportPath` and no `Package` at all. |
+| `singleproc.json` | `GOMAXPROCS=1 go test -count=1 -json $P`                                                  | The unshuffled single-processor baseline: only the always-broken test fails. |
+| `orderload.json` | `GOMAXPROCS=4 go test -count=1 -json -shuffle=1 $P`                                      | Both discriminators firing at once, which is the fourth of the fixture's four outcome sets. |
 | `truncated.json` | `head -c 1300 loadfail.json`                                                              | What a killed process leaves behind: the last JSON object is cut in half and two tests are still in flight. |
 
 ## The two mutated recordings
@@ -52,5 +54,5 @@ func TestWillNotCompile(t *testing.T) {
 
 Timestamps and goroutine addresses differ on every run, and the stack frames in
 `panic.json` name absolute paths from the machine that recorded it. Nothing in
-this repository asserts on any of those, but re-record all six together if you
+this repository asserts on any of those, but re-record all eight together if you
 re-record at all, so the set stays internally consistent.
