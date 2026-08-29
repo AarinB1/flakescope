@@ -178,10 +178,15 @@ func Build(pkg string, base runner.Config, results []runner.Result) Report {
 			}
 			continue
 		}
-		rep.Completed++
+		// OutcomeCompleted is iota zero, so a Result the runner never
+		// filled in (parent context cancelled before dispatch) lands
+		// here with a nil Run. That is not a completed configuration:
+		// counting it as one makes ExitCode report a clean matrix for
+		// a run that learned nothing.
 		if res.Run == nil {
 			continue
 		}
+		rep.Completed++
 		if res.Run.BuildFailed() {
 			// The diagnostic is kept from the first failing configuration only.
 			// Every configuration fails to build identically, and printing the

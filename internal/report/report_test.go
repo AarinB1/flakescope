@@ -597,6 +597,60 @@ func TestPartialBuildFailureKeepsCompiledPackages(t *testing.T) {
 	}
 }
 
+// TestBuildNeverStartedResultsAreNotCompleted is the fixture that breaks a
+// Build which treats the zero Result as OutcomeCompleted. The runner leaves
+// that value for configurations never dispatched after cancel; counting
+// those as completed makes ExitCode claim a clean matrix for a run that
+// learned nothing.
+func TestBuildNeverStartedResultsAreNotCompleted(t *testing.T) {
+	good := result(t, cfgFourP, "allpass.json")
+	tests := []struct {
+		name          string
+		results       []runner.Result
+		wantCompleted int
+		wantCode      int
+	}{
+		{
+			name:          "all never started",
+			results:       make([]runner.Result, 4),
+			wantCompleted: 0,
+			wantCode:      ExitToolFailure,
+		},
+		{
+			name: "in-flight errors and never-started slots",
+			results: []runner.Result{
+				{Config: cfgSingleP, Outcome: runner.OutcomeError, Err: os.ErrClosed},
+				{},
+				{},
+			},
+			wantCompleted: 0,
+			wantCode:      ExitToolFailure,
+		},
+		{
+			name: "a real completion is still counted",
+			results: []runner.Result{
+				good,
+				{},
+				{},
+			},
+			wantCompleted: 1,
+			wantCode:      ExitClean,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := Build(fixturePkg, runner.Default(), tc.results)
+			if rep.Completed != tc.wantCompleted {
+				t.Errorf("Completed = %d, want %d; never-started slots are not completions",
+					rep.Completed, tc.wantCompleted)
+			}
+			if got := rep.ExitCode(); got != tc.wantCode {
+				t.Errorf("ExitCode() = %d, want %d", got, tc.wantCode)
+			}
+		})
+	}
+}
+
 // TestTimeoutsAndErrorsProduceNoEvidence: a configuration that timed out is
 // neither a pass nor a failure, so it cannot move a failure rate.
 func TestTimeoutsAndErrorsProduceNoEvidence(t *testing.T) {

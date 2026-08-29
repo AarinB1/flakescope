@@ -304,7 +304,11 @@ func TestRunCancelsOnInterrupt(t *testing.T) {
 	}
 
 	select {
-	case <-done:
+	case code := <-done:
+		if code != report.ExitToolFailure {
+			t.Errorf("run after interrupt = %d, want %d; a cancelled matrix that learned nothing must not exit 0",
+				code, report.ExitToolFailure)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("run did not return after the executor finished")
 	}
