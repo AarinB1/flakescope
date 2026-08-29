@@ -434,9 +434,14 @@ func TestExitCode(t *testing.T) {
 			want: ExitFlaky,
 		},
 		{
-			name: "a build failure is a tool failure, not a finding",
-			rep:  Report{Configurations: 20, Completed: 20, BuildFailed: true, Tests: []Test{{Class: ClassFlaky}}},
+			name: "a build failure with no tests is a tool failure, not a finding",
+			rep:  Report{Configurations: 20, Completed: 20, BuildFailed: true},
 			want: ExitToolFailure,
+		},
+		{
+			name: "a build failure that still produced tests is classified by those tests",
+			rep:  Report{Configurations: 20, Completed: 20, BuildFailed: true, Tests: []Test{{Class: ClassFlaky}}},
+			want: ExitFlaky,
 		},
 		{
 			name: "nothing completed means nothing was learned",
@@ -479,6 +484,116 @@ func TestBuildFailureProducesNoFindings(t *testing.T) {
 	// reported once, not once per configuration.
 	if got := strings.Count(strings.Join(rep.BuildOutput, ""), "cannot use 42"); got != 1 {
 		t.Errorf("the compiler diagnostic appears %d times, want exactly 1: %v", got, rep.BuildOutput)
+	}
+}
+
+func resultFromJSON(t *testing.T, cfg runner.Config, stream string) runner.Result {
+	t.Helper()
+	run, err := gotest.ParseBytes([]byte(stream))
+	if err != nil {
+		t.Fatalf("parsing stream: %v", err)
+	}
+	return runner.Result{Config: cfg, Outcome: runner.OutcomeCompleted, Run: run}
+}
+
+func testByPkgName(t *testing.T, rep Report, pkg, name string) Test {
+	t.Helper()
+	for _, e := range rep.Tests {
+		if e.Package == pkg && e.Name == name {
+			return e
+		}
+	}
+	t.Fatalf("test %s.%s not in report; have %v", pkg, name, names(rep.Tests))
+	return Test{}
+}
+
+// TestSameNamedTestsInDifferentPackagesAreNotMerged is the fixture that breaks
+// a report that keys tests by Name alone. An always-passing TestNew next to an
+// always-failing TestNew is two tests, not one flake.
+func TestSameNamedTestsInDifferentPackagesAreNotMerged(t *testing.T) {
+	const stream = `{"Action":"run","Package":"example.com/pass","Test":"TestNew"}
+{"Action":"pass","Package":"example.com/pass","Test":"TestNew"}
+{"Action":"pass","Package":"example.com/pass"}
+{"Action":"run","Package":"example.com/fail","Test":"TestNew"}
+{"Action":"fail","Package":"example.com/fail","Test":"TestNew"}
+{"Action":"fail","Package":"example.com/fail"}
+`
+	rep := Build("./...", runner.Default(), []runner.Result{
+		resultFromJSON(t, cfgSingleP, stream),
+		resultFromJSON(t, cfgFourP, stream),
+	})
+
+	if got := len(rep.Tests); got != 2 {
+		t.Fatalf("tests = %d, want 2 (one per package); got %v", got, names(rep.Tests))
+	}
+	pass := testByPkgName(t, rep, "example.com/pass", "TestNew")
+	if pass.Class != ClassNeverFails || pass.Pass != 2 || pass.Fail != 0 {
+		t.Errorf("example.com/pass.TestNew = class %v pass/fail %d/%d, want never-fails 2/0",
+			pass.Class, pass.Pass, pass.Fail)
+	}
+	fail := testByPkgName(t, rep, "example.com/fail", "TestNew")
+	if fail.Class != ClassAlwaysFails || fail.Pass != 0 || fail.Fail != 2 {
+		t.Errorf("example.com/fail.TestNew = class %v pass/fail %d/%d, want always-fails 0/2",
+			fail.Class, fail.Pass, fail.Fail)
+	}
+	if got := rep.ExitCode(); got != ExitClean {
+		t.Errorf("ExitCode() = %d, want %d; merging the two TestNews would invent a flake", got, ExitClean)
+	}
+
+	var b strings.Builder
+	if err := rep.WriteText(&b, false); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	got := b.String()
+	if !strings.Contains(got, "example.com/fail.TestNew") {
+		t.Errorf("text report does not name the failing package:\n%s", got)
+	}
+	if strings.Contains(got, "FLAKY") {
+		t.Errorf("text report invented a flake from two same-named tests:\n%s", got)
+	}
+}
+
+// TestPartialBuildFailureKeepsCompiledPackages is the fixture that breaks a
+// report which treats any compile error as "this configuration produced no
+// tests". go test ./... still emits results for every package that compiled.
+func TestPartialBuildFailureKeepsCompiledPackages(t *testing.T) {
+	const stream = `{"Action":"build-output","ImportPath":"example.com/broken","Output":"broken.go:1: cannot use 42\n"}
+{"Action":"build-fail","ImportPath":"example.com/broken"}
+{"Action":"fail","Package":"example.com/broken","FailedBuild":"example.com/broken"}
+{"Action":"run","Package":"example.com/ok","Test":"TestOK"}
+{"Action":"pass","Package":"example.com/ok","Test":"TestOK"}
+{"Action":"pass","Package":"example.com/ok"}
+`
+	rep := Build("./...", runner.Default(), []runner.Result{
+		resultFromJSON(t, cfgSingleP, stream),
+		resultFromJSON(t, cfgFourP, stream),
+	})
+
+	if !rep.BuildFailed {
+		t.Fatal("BuildFailed = false, want true")
+	}
+	ok := testByPkgName(t, rep, "example.com/ok", "TestOK")
+	if ok.Class != ClassNeverFails || ok.Pass != 2 {
+		t.Errorf("example.com/ok.TestOK = class %v pass %d, want never-fails 2", ok.Class, ok.Pass)
+	}
+	if got := rep.ExitCode(); got != ExitClean {
+		t.Errorf("ExitCode() = %d, want %d; a compile error in one package must not discard the rest",
+			got, ExitClean)
+	}
+
+	var b strings.Builder
+	if err := rep.WriteText(&b, false); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	got := b.String()
+	if !strings.Contains(got, "BUILD FAILED") {
+		t.Errorf("text report dropped the compile error:\n%s", got)
+	}
+	if !strings.Contains(got, "cannot use 42") {
+		t.Errorf("text report dropped the compiler diagnostic:\n%s", got)
+	}
+	if !strings.Contains(got, "No flaky tests found.") {
+		t.Errorf("text report did not report the packages that compiled:\n%s", got)
 	}
 }
 

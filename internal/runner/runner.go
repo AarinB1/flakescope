@@ -189,6 +189,9 @@ func (r *Runner) goTest(ctx context.Context, cfg Config) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "go", cfg.Args(r.Package)...)
 	cmd.Dir = r.Dir
 	cmd.Env = cfg.Env(os.Environ())
+	// CommandContext only SIGKILLs the `go` process. The test binary it
+	// started is a child and survives that kill unless the whole group dies.
+	configureKillProcessGroup(cmd)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

@@ -134,14 +134,17 @@ type Report struct {
 	TimedOut       int
 	Errored        int
 
-	// BuildFailed means the package did not compile. It is not a finding about
-	// flakiness, and it maps to exit code 2 rather than 1.
+	// BuildFailed means at least one package did not compile. When that left
+	// nothing to measure, it maps to exit code 2 rather than 1: a compile
+	// error is not a flakiness finding. When other packages still produced
+	// tests, those tests decide the exit code.
 	BuildFailed bool
 	BuildOutput []string
 	// Errs holds the reasons behind Errored.
 	Errs []error
 
-	// Tests, sorted by name so two runs of the same matrix print identically.
+	// Tests, sorted by package then name so two runs of the same matrix print
+	// identically, and so same-named tests in different packages stay distinct.
 	Tests []Test
 }
 
@@ -150,14 +153,15 @@ type Report struct {
 func Build(pkg string, base runner.Config, results []runner.Result) Report {
 	rep := Report{Package: pkg, Base: base, Configurations: len(results)}
 
-	byName := make(map[string]*Test)
+	byKey := make(map[string]*Test)
 	order := make([]string, 0)
 	get := func(t *gotest.Test) *Test {
-		e, ok := byName[t.Name]
+		key := t.Package + "\x00" + t.Name
+		e, ok := byKey[key]
 		if !ok {
 			e = &Test{Package: t.Package, Name: t.Name}
-			byName[t.Name] = e
-			order = append(order, t.Name)
+			byKey[key] = e
+			order = append(order, key)
 		}
 		return e
 	}
@@ -190,9 +194,9 @@ func Build(pkg string, base runner.Config, results []runner.Result) Report {
 				}
 			}
 			rep.BuildFailed = true
-			// A package that did not compile ran no tests. There is nothing to
-			// attribute to any test name.
-			continue
+			// A package that did not compile ran no tests, but `go test ./...`
+			// still emits results for every package that did compile. Those
+			// stay in the report.
 		}
 		for _, t := range res.Run.Tests() {
 			e := get(t)
@@ -215,8 +219,8 @@ func Build(pkg string, base runner.Config, results []runner.Result) Report {
 	}
 
 	sort.Strings(order)
-	for _, name := range order {
-		e := byName[name]
+	for _, key := range order {
+		e := byKey[key]
 		e.Class = classify(*e)
 		if e.Class == ClassFlaky {
 			e.Dependence = dependence(*e)
@@ -270,7 +274,10 @@ const (
 
 // ExitCode maps the report to a process exit code.
 func (r Report) ExitCode() int {
-	if r.BuildFailed {
+	// A compile error with no tests is a tool failure. A compile error that
+	// left other packages' results intact is not: those results are what
+	// flakescope was asked to measure.
+	if r.BuildFailed && len(r.Tests) == 0 {
 		return ExitToolFailure
 	}
 	// Nothing completed means nothing was learned. Reporting "no flaky tests"
@@ -504,12 +511,18 @@ func (r Report) WriteText(w io.Writer, verbose bool) error {
 		r.Configurations, r.Completed, r.TimedOut, r.Errored)
 
 	if r.BuildFailed {
-		b.WriteString("\nBUILD FAILED - the package does not compile, so nothing was measured.\n")
+		if len(r.Tests) == 0 {
+			b.WriteString("\nBUILD FAILED - the package does not compile, so nothing was measured.\n")
+		} else {
+			b.WriteString("\nBUILD FAILED - some packages did not compile; results below are from those that did.\n")
+		}
 		for _, line := range r.BuildOutput {
 			b.WriteString("  " + strings.TrimRight(line, "\n") + "\n")
 		}
-		_, err := io.WriteString(w, b.String())
-		return err
+		if len(r.Tests) == 0 {
+			_, err := io.WriteString(w, b.String())
+			return err
+		}
 	}
 
 	for _, e := range r.Errs {
@@ -523,7 +536,7 @@ func (r Report) WriteText(w io.Writer, verbose bool) error {
 	} else {
 		fmt.Fprintf(&b, "FLAKY (%d)\n", len(flaky))
 		for _, t := range flaky {
-			fmt.Fprintf(&b, "  %s\n", t.Name)
+			fmt.Fprintf(&b, "  %s\n", testID(t))
 			fmt.Fprintf(&b, "      failed %d/%d configurations (%.0f%%)",
 				t.Fail, t.Observations(), t.FailureRate()*100)
 			if d := t.Dependence.String(); d != "" {
@@ -531,7 +544,7 @@ func (r Report) WriteText(w io.Writer, verbose bool) error {
 			}
 			b.WriteString("\n")
 			if t.Minimal != nil {
-				fmt.Fprintf(&b, "      minimal repro: %s %s\n", *t.Minimal, r.Package)
+				fmt.Fprintf(&b, "      minimal repro: %s %s\n", *t.Minimal, testPkg(t, r.Package))
 			}
 			if verbose {
 				writeOutput(&b, t.FailureOutput)
@@ -542,7 +555,7 @@ func (r Report) WriteText(w io.Writer, verbose bool) error {
 	if broken := r.AlwaysFails(); len(broken) > 0 {
 		fmt.Fprintf(&b, "\nALWAYS FAILS (%d) - deterministic, not flaky\n", len(broken))
 		for _, t := range broken {
-			fmt.Fprintf(&b, "  %s\n      failed %d/%d configurations\n", t.Name, t.Fail, t.Observations())
+			fmt.Fprintf(&b, "  %s\n      failed %d/%d configurations\n", testID(t), t.Fail, t.Observations())
 			if verbose {
 				writeOutput(&b, t.FailureOutput)
 			}
@@ -554,6 +567,23 @@ func (r Report) WriteText(w io.Writer, verbose bool) error {
 
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// testID names a test so same-named tests in different packages stay distinct
+// in the text report. The JSON schema already carries package and name as
+// separate fields.
+func testID(t Test) string {
+	if t.Package == "" {
+		return t.Name
+	}
+	return t.Package + "." + t.Name
+}
+
+func testPkg(t Test, fallback string) string {
+	if t.Package != "" {
+		return t.Package
+	}
+	return fallback
 }
 
 func writeOutput(b *strings.Builder, lines []string) {
