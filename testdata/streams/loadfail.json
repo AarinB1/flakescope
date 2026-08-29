@@ -1,0 +1,34 @@
+{"Time":"2026-08-29T21:44:56.234316828Z","Action":"start","Package":"github.com/AarinB1/flakescope/testdata/flakypkg"}
+{"Time":"2026-08-29T21:44:56.236827446Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses"}
+{"Time":"2026-08-29T21:44:56.236854801Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses","Output":"=== RUN   TestAlwaysPasses\n"}
+{"Time":"2026-08-29T21:44:56.236885053Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/add"}
+{"Time":"2026-08-29T21:44:56.236889646Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/add","Output":"=== RUN   TestAlwaysPasses/add\n"}
+{"Time":"2026-08-29T21:44:56.236897246Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/add","Output":"--- PASS: TestAlwaysPasses/add (0.00s)\n"}
+{"Time":"2026-08-29T21:44:56.236900485Z","Action":"pass","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/add","Elapsed":0}
+{"Time":"2026-08-29T21:44:56.236904704Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/multiply"}
+{"Time":"2026-08-29T21:44:56.236907086Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/multiply","Output":"=== RUN   TestAlwaysPasses/multiply\n"}
+{"Time":"2026-08-29T21:44:56.236912163Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/multiply","Output":"--- PASS: TestAlwaysPasses/multiply (0.00s)\n"}
+{"Time":"2026-08-29T21:44:56.236915946Z","Action":"pass","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/multiply","Elapsed":0}
+{"Time":"2026-08-29T21:44:56.236923149Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses","Output":"--- PASS: TestAlwaysPasses (0.00s)\n"}
+{"Time":"2026-08-29T21:44:56.23696444Z","Action":"pass","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses","Elapsed":0}
+{"Time":"2026-08-29T21:44:56.236971317Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestOrderDependent"}
+{"Time":"2026-08-29T21:44:56.236975566Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestOrderDependent","Output":"=== RUN   TestOrderDependent\n"}
+{"Time":"2026-08-29T21:44:56.236980163Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestOrderDependent","Output":"--- PASS: TestOrderDependent (0.00s)\n"}
+{"Time":"2026-08-29T21:44:56.237066179Z","Action":"pass","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestOrderDependent","Elapsed":0}
+{"Time":"2026-08-29T21:44:56.23707115Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPoisonsGlobalState"}
+{"Time":"2026-08-29T21:44:56.237073668Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPoisonsGlobalState","Output":"=== RUN   TestPoisonsGlobalState\n"}
+{"Time":"2026-08-29T21:44:56.237077479Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPoisonsGlobalState","Output":"--- PASS: TestPoisonsGlobalState (0.00s)\n"}
+{"Time":"2026-08-29T21:44:56.237085315Z","Action":"pass","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPoisonsGlobalState","Elapsed":0}
+{"Time":"2026-08-29T21:44:56.237089182Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestLoadDependent"}
+{"Time":"2026-08-29T21:44:56.237091502Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestLoadDependent","Output":"=== RUN   TestLoadDependent\n"}
+{"Time":"2026-08-29T21:44:56.237389017Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestLoadDependent","Output":"    flaky_test.go:100: parallel execution exposed the bug: GOMAXPROCS=4\n"}
+{"Time":"2026-08-29T21:44:56.237409572Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestLoadDependent","Output":"--- FAIL: TestLoadDependent (0.00s)\n"}
+{"Time":"2026-08-29T21:44:56.237472706Z","Action":"fail","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestLoadDependent","Elapsed":0}
+{"Time":"2026-08-29T21:44:56.237547938Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysFails"}
+{"Time":"2026-08-29T21:44:56.237553774Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysFails","Output":"=== RUN   TestAlwaysFails\n"}
+{"Time":"2026-08-29T21:44:56.23762402Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysFails","Output":"    flaky_test.go:105: this test is broken in every configuration, which is not the same as flaky\n"}
+{"Time":"2026-08-29T21:44:56.237639296Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysFails","Output":"--- FAIL: TestAlwaysFails (0.00s)\n"}
+{"Time":"2026-08-29T21:44:56.237688213Z","Action":"fail","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysFails","Elapsed":0}
+{"Time":"2026-08-29T21:44:56.237698738Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Output":"FAIL\n"}
+{"Time":"2026-08-29T21:44:56.238251214Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Output":"FAIL\tgithub.com/AarinB1/flakescope/testdata/flakypkg\t0.004s\n"}
+{"Time":"2026-08-29T21:44:56.238286396Z","Action":"fail","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Elapsed":0.004}

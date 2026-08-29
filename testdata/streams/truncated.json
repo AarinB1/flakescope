@@ -1,0 +1,8 @@
+{"Time":"2026-08-29T21:44:56.234316828Z","Action":"start","Package":"github.com/AarinB1/flakescope/testdata/flakypkg"}
+{"Time":"2026-08-29T21:44:56.236827446Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses"}
+{"Time":"2026-08-29T21:44:56.236854801Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses","Output":"=== RUN   TestAlwaysPasses\n"}
+{"Time":"2026-08-29T21:44:56.236885053Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/add"}
+{"Time":"2026-08-29T21:44:56.236889646Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/add","Output":"=== RUN   TestAlwaysPasses/add\n"}
+{"Time":"2026-08-29T21:44:56.236897246Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/add","Output":"--- PASS: TestAlwaysPasses/add (0.00s)\n"}
+{"Time":"2026-08-29T21:44:56.236900485Z","Action":"pass","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/add","Elapsed":0}
+{"Time":"2026-08-29T21:44:56.236904704Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/multiply
