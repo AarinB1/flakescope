@@ -337,3 +337,92 @@ func TestUsageDocumentsExitCodes(t *testing.T) {
 		t.Error("usage text claims to reproduce interleavings")
 	}
 }
+
+// TestNewRunnerCarriesParsedFlags walks the whole path from argv to the runner.
+//
+// Every other test in this file enters through the executor seam with a
+// recorded stream, which means nothing exercises the one function that turns
+// parsed flags into the object that reaches os/exec. Those lines could stop
+// propagating --timeout, or hand `go test` the wrong package string, and this
+// suite would stay green while the tool measured the wrong thing.
+//
+// The wanted values are written out literally rather than read back off opts,
+// so a bug in parseFlags cannot make this test agree with it.
+func TestNewRunnerCarriesParsedFlags(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantPkg     string
+		wantTimeout time.Duration
+	}{
+		{
+			name:        "the default timeout reaches the runner",
+			args:        []string{"./..."},
+			wantPkg:     "./...",
+			wantTimeout: 10 * time.Minute,
+		},
+		{
+			name:        "an explicit timeout reaches the runner",
+			args:        []string{"--timeout", "45s", "./internal/queue"},
+			wantPkg:     "./internal/queue",
+			wantTimeout: 45 * time.Second,
+		},
+		{
+			name:        "a sub-second timeout is not rounded away",
+			args:        []string{"--timeout", "250ms", "example.com/x/y"},
+			wantPkg:     "example.com/x/y",
+			wantTimeout: 250 * time.Millisecond,
+		},
+		{
+			name:        "zero means no per-configuration deadline, not the default one",
+			args:        []string{"--timeout", "0", "./pkg"},
+			wantPkg:     "./pkg",
+			wantTimeout: 0,
+		},
+		{
+			name:        "flags that are not the runner's do not disturb it",
+			args:        []string{"--runs", "1000", "--json", "--verbose", "--timeout", "1m", "./pkg"},
+			wantPkg:     "./pkg",
+			wantTimeout: time.Minute,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr strings.Builder
+			opts, err := parseFlags(tc.args, &stderr)
+			if err != nil {
+				t.Fatalf("parseFlags(%v): %v", tc.args, err)
+			}
+			r := newRunner(opts)
+			if r.Package != tc.wantPkg {
+				t.Errorf("runner.Package = %q, want %q; `go test` would be pointed at the wrong package",
+					r.Package, tc.wantPkg)
+			}
+			if r.Timeout != tc.wantTimeout {
+				t.Errorf("runner.Timeout = %v, want %v; --timeout is not reaching the runner",
+					r.Timeout, tc.wantTimeout)
+			}
+			if r.Dir != "" {
+				t.Errorf("runner.Dir = %q, want empty; flakescope must resolve the package from the caller's working directory",
+					r.Dir)
+			}
+		})
+	}
+}
+
+// TestGoTestWithNoConfigurationsRunsNothing covers goTest itself, which is the
+// call to Run and nothing else. An empty matrix returns before any
+// configuration is dispatched, so this reaches the statement without reaching a
+// process (CLAUDE.md rule 2).
+func TestGoTestWithNoConfigurationsRunsNothing(t *testing.T) {
+	var stderr strings.Builder
+	opts, err := parseFlags([]string{"--timeout", "1s", fixturePkg}, &stderr)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	got := goTest(context.Background(), opts, nil)
+	if len(got) != 0 {
+		t.Errorf("goTest with no configurations returned %d results, want 0", len(got))
+	}
+}

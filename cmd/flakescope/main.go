@@ -100,10 +100,26 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 // implementation that reaches a process.
 type executor func(ctx context.Context, opts options, configs []runner.Config) []runner.Result
 
-func goTest(ctx context.Context, opts options, configs []runner.Config) []runner.Result {
+// newRunner builds the runner goTest will use.
+//
+// It is split out from goTest so that a test can assert the parsed flags reach
+// the runner without invoking `go test` (CLAUDE.md rule 2). This is the seam
+// between what a user types and everything the tool does: a --timeout that
+// stopped being propagated, or a package string that arrived wrong, would
+// change every result flakescope produces while leaving a suite that replays
+// recorded streams entirely green.
+//
+// Dir is deliberately left at its zero value, which means the caller's working
+// directory. flakescope resolves the package the same way the user's own
+// `go test` would.
+func newRunner(opts options) *runner.Runner {
 	r := runner.New(opts.pkg)
 	r.Timeout = opts.timeout
-	return r.Run(ctx, configs)
+	return r
+}
+
+func goTest(ctx context.Context, opts options, configs []runner.Config) []runner.Result {
+	return newRunner(opts).Run(ctx, configs)
 }
 
 func run(args []string, stdout, stderr io.Writer, exec executor) int {

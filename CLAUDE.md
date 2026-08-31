@@ -21,6 +21,10 @@ comments, README, or output text.
 4. An assertion that cannot fail is worse than no assertion, because it also
    occupies the space where a real one would go. Every assertion about
    detection must be demonstrated to fail against a fixture that breaks it.
+5. A recorded fixture stream is mapped to the exact configuration it was
+   recorded under, never to a nearby one. A fake that answers a configuration
+   with a stream recorded elsewhere fabricates results and produces failures
+   that point at the wrong file.
 
 ## Scope
 

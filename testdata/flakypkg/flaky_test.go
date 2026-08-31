@@ -70,12 +70,20 @@ func TestPoisonsGlobalState(t *testing.T) {
 // TestLoadDependent fails when GOMAXPROCS > 1.
 //
 // The goroutines below do real concurrent work, but the failing assertion reads
-// runtime.GOMAXPROCS directly rather than racing on the shared counter. That is
-// deliberate. A genuine data race is nondeterministic by definition, so a
-// fixture built on one would sometimes pass under GOMAXPROCS=8 and sometimes
-// fail under GOMAXPROCS=1, and every assertion downstream of it in this
-// repository would inherit that. This test stands in for the class of failure
-// that only appears once more than one P is available, without being one.
+// runtime.GOMAXPROCS directly rather than racing on the shared counter.
+//
+// DO NOT MAKE THIS REALISTIC. Determinism outranks realism here, and the
+// mutex is not an oversight to be removed. Replacing the configuration read
+// with a genuine data race breaks the premise the whole repository rests on: a
+// real race is nondeterministic by definition, so this test would sometimes
+// pass under GOMAXPROCS=8 and sometimes fail under GOMAXPROCS=1, and every
+// assertion that depends on it - the classifier, the dependence rules, the
+// minimal-configuration ordering - would inherit that nondeterminism and stop
+// meaning anything. A flaky-test detector with a flaky test suite is not
+// shippable (CLAUDE.md rule 2).
+//
+// What this test is, precisely: a stand-in for the class of failure that only
+// appears once more than one P is available, which is not itself one.
 func TestLoadDependent(t *testing.T) {
 	const workers = 8
 
