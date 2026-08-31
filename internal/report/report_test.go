@@ -10,6 +10,7 @@ import (
 
 	"github.com/AarinB1/flakescope/internal/gotest"
 	"github.com/AarinB1/flakescope/internal/runner"
+	"github.com/AarinB1/flakescope/internal/signature"
 )
 
 const fixturePkg = "github.com/AarinB1/flakescope/testdata/flakypkg"
@@ -1288,5 +1289,90 @@ func TestVerboseListsEveryConfigurationInACluster(t *testing.T) {
 	}
 	if !strings.Contains(loud.String(), other) {
 		t.Errorf("--verbose did not list the other configuration in the cluster\n%s", loud.String())
+	}
+}
+
+// TestVerboseListsConfigurationsForASingleSignature is the fixture that breaks
+// a --verbose that only lists members inside writeClusters. One signature is
+// the common case and never enters that function.
+func TestVerboseListsConfigurationsForASingleSignature(t *testing.T) {
+	min := runner.Config{GOMAXPROCS: 4, Count: 1}
+	other := runner.Config{GOMAXPROCS: 4, ShuffleSeed: 1, Count: 1}
+	const also = "also: GOMAXPROCS=4 go test -shuffle=1 -count=1"
+
+	tests := []struct {
+		name string
+		pins string
+		rep  Report
+	}{
+		{
+			name: "flaky, one signature",
+			pins: "the common path lists members; writeClusters is not the only --verbose path",
+			rep: Report{
+				Package:        "example.com/p",
+				Configurations: 3,
+				Completed:      3,
+				Tests: []Test{{
+					Package:    "example.com/p",
+					Name:       "TestOneCause",
+					Pass:       1,
+					Fail:       2,
+					Class:      ClassFlaky,
+					Dependence: DependenceLoad,
+					Minimal:    &min,
+					Clusters: []Cluster{{
+						Signature: signature.Signature{Hash: "aaaaaaaaaaaaaaaa"},
+						Count:     2,
+						Minimal:   min,
+						configs:   []runner.Config{other, min},
+					}},
+				}},
+			},
+		},
+		{
+			name: "always-fails, one signature",
+			pins: "always-fails uses the same one-signature verbose path",
+			rep: Report{
+				Package:        "example.com/p",
+				Configurations: 2,
+				Completed:      2,
+				Tests: []Test{{
+					Package: "example.com/p",
+					Name:    "TestBroken",
+					Fail:    2,
+					Class:   ClassAlwaysFails,
+					Clusters: []Cluster{{
+						Signature: signature.Signature{Hash: "bbbbbbbbbbbbbbbb"},
+						Count:     2,
+						Minimal:   min,
+						configs:   []runner.Config{other, min},
+					}},
+				}},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var quiet, loud strings.Builder
+			if err := tc.rep.WriteText(&quiet, false); err != nil {
+				t.Fatalf("WriteText: %v", err)
+			}
+			if err := tc.rep.WriteText(&loud, true); err != nil {
+				t.Fatalf("WriteText(verbose): %v", err)
+			}
+			if strings.Contains(quiet.String(), "distinct failure signatures") {
+				t.Fatalf("a one-signature test was printed as a cluster block; this row pins that %s\n%s",
+					tc.pins, quiet.String())
+			}
+			if strings.Contains(quiet.String(), also) {
+				t.Errorf("every configuration was listed without --verbose; that is what --verbose is for\n%s",
+					quiet.String())
+			}
+			if !strings.Contains(loud.String(), also) {
+				t.Errorf("--verbose did not list the other configuration; this row pins that %s\n%s",
+					tc.pins, loud.String())
+			}
+		})
 	}
 }

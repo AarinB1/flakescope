@@ -143,6 +143,53 @@ Previous write at 0x00c0001922a8 by goroutine 10:
 ==================
 `
 
+// racePreviousAtomicA is the form TSan emits when the earlier access was
+// atomic: "Previous atomic write" with a lowercase a. The current-access
+// header is a plain Read, so a matcher that only accepted capital Atomic
+// would keep that stack and drop this one.
+const racePreviousAtomicA = `
+==================
+WARNING: DATA RACE
+Read at 0x00c0001922a8 by goroutine 9:
+  example.com/p.TestRaces.func1()
+      /home/u/p/crash_test.go:52 +0x84
+
+Previous atomic write at 0x00c0001922a8 by goroutine 10:
+  example.com/p.atomicStore()
+      /home/u/p/atomic.go:8 +0x20
+==================
+`
+
+// racePreviousAtomicB differs from racePreviousAtomicA only in addresses,
+// goroutine IDs and offsets, including in the previous-atomic stack.
+const racePreviousAtomicB = `
+==================
+WARNING: DATA RACE
+Read at 0x00c000abcd00 by goroutine 41:
+  example.com/p.TestRaces.func1()
+      /home/u/p/crash_test.go:52 +0x1
+
+Previous atomic write at 0x00c000abcd00 by goroutine 77:
+  example.com/p.atomicStore()
+      /home/u/p/atomic.go:8 +0x99
+==================
+`
+
+// racePreviousAtomicSecondDiffers matches racePreviousAtomicA in its first
+// stack and names a different function in the previous-atomic one.
+const racePreviousAtomicSecondDiffers = `
+==================
+WARNING: DATA RACE
+Read at 0x00c0001922a8 by goroutine 9:
+  example.com/p.TestRaces.func1()
+      /home/u/p/crash_test.go:52 +0x84
+
+Previous atomic write at 0x00c0001922a8 by goroutine 10:
+  example.com/p.otherAtomicStore()
+      /home/u/p/other.go:14 +0x20
+==================
+`
+
 // TestSignatureGrouping is the whole contract: which failures share a hash and
 // which do not. Every row names the property it pins, because a row that pins
 // nothing is a row that cannot fail for a reason anyone would act on.
@@ -238,6 +285,20 @@ func TestSignatureGrouping(t *testing.T) {
 			pins:      "the second race stack is INCLUDED; without this the row above would pass by omission",
 			a:         raceRunA,
 			b:         raceSecondStackDiffers,
+			wantEqual: false,
+		},
+		{
+			name:      "previous-atomic race reports differing only in addresses and goroutine IDs",
+			pins:      "Previous atomic write is recognised and normalized, not dropped",
+			a:         racePreviousAtomicA,
+			b:         racePreviousAtomicB,
+			wantEqual: true,
+		},
+		{
+			name:      "previous-atomic race reports whose second stack names a different function",
+			pins:      "the Previous atomic stack is INCLUDED; without this the row above would pass by dropping it",
+			a:         racePreviousAtomicA,
+			b:         racePreviousAtomicSecondDiffers,
 			wantEqual: false,
 		},
 		{

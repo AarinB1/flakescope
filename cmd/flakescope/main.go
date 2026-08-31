@@ -73,7 +73,7 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	// not kill runs the go tool would have let finish and then report them as
 	// timeouts of its own making.
 	fs.DurationVar(&opts.timeout, "timeout", 10*time.Minute, "per-configuration timeout")
-	fs.BoolVar(&opts.verbose, "verbose", false, "include failure output")
+	fs.BoolVar(&opts.verbose, "verbose", false, "list every configuration behind each failure group")
 
 	if err := fs.Parse(args); err != nil {
 		return opts, fmt.Errorf("%w: %v", errUsage, err)

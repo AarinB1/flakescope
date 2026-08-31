@@ -694,6 +694,11 @@ func (r Report) WriteText(w io.Writer, verbose bool) error {
 			}
 			if verbose {
 				writeOutput(&b, t.FailureOutput)
+				if len(t.Clusters) == 1 {
+					for _, cfg := range t.Clusters[0].configs {
+						fmt.Fprintf(&b, "      also: %s\n", cfg)
+					}
+				}
 			}
 		}
 	}
@@ -710,6 +715,11 @@ func (r Report) WriteText(w io.Writer, verbose bool) error {
 			}
 			if verbose {
 				writeOutput(&b, t.FailureOutput)
+				if len(t.Clusters) == 1 {
+					for _, cfg := range t.Clusters[0].configs {
+						fmt.Fprintf(&b, "      also: %s\n", cfg)
+					}
+				}
 			}
 		}
 	}

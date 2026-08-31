@@ -182,7 +182,9 @@ var (
 	// "Previous" and the atomic variants are all of the forms the detector
 	// emits; the goroutine-creation stacks that follow are deliberately not
 	// matched here - see raceBody.
-	raceAccessRE = regexp.MustCompile(`^(?:Previous )?(?:Atomic )?(?:[Rr]ead|[Ww]rite) at .* by .*:$`)
+	// TSan capitalises "Atomic" only at the start of a line ("Atomic read at");
+	// a prior atomic access is "Previous atomic write at" with a lowercase a.
+	raceAccessRE = regexp.MustCompile(`^(?:Previous )?(?:[Aa]tomic )?(?:[Rr]ead|[Ww]rite) at .* by .*:$`)
 	raceRuleRE   = regexp.MustCompile(`^=+$`)
 )
 
