@@ -460,7 +460,7 @@ func TestGoTestWithNoConfigurationsRunsNothing(t *testing.T) {
 // silently removes evidence the tests below assert on. This says so out loud
 // instead.
 func TestEveryMatrixConfigurationHasARecording(t *testing.T) {
-	for _, runs := range []int{8, 16, 20} {
+	for _, runs := range []int{8, 16, 20, 1000} {
 		for _, cfg := range runner.Matrix(fixtureBase, runs) {
 			if fixtureStream(cfg) == "" {
 				t.Errorf("--runs %d generates %s, which no recorded stream was made under", runs, cfg)
@@ -614,5 +614,85 @@ func TestRunJSONClusters(t *testing.T) {
 	}
 	if !load || !order {
 		t.Errorf("expected tests missing from the report: load=%v order=%v", load, order)
+	}
+}
+
+// TestRunAtAThousandConfigurations is the scale claim through the whole CLI:
+// flags, matrix, executor, clustering, rendering and exit code.
+//
+// It replays recorded streams rather than invoking `go test` (CLAUDE.md rule 2),
+// so what it measures is that the pipeline handles a thousand configurations
+// coherently - not how long a thousand real `go test` invocations take. That
+// number is measured separately and reported in the README, because a wall-clock
+// figure produced by a test that never starts a process would be a lie.
+func TestRunAtAThousandConfigurations(t *testing.T) {
+	const runs = 1000
+
+	var stdout, stderr strings.Builder
+	code := run([]string{"--runs", "1000", "--json", fixturePkg}, &stdout, &stderr, fixtureBase, replay(t, fixtureStream))
+	if code != report.ExitFlaky {
+		t.Fatalf("run = %d, want %d\nstderr:\n%s", code, report.ExitFlaky, stderr.String())
+	}
+
+	var doc struct {
+		Configurations int `json:"configurations"`
+		Completed      int `json:"completed"`
+		TimedOut       int `json:"timed_out"`
+		Errored        int `json:"errored"`
+		Tests          []struct {
+			Name     string `json:"name"`
+			Pass     int    `json:"pass"`
+			Fail     int    `json:"fail"`
+			Clusters []struct {
+				Signature string `json:"signature"`
+				Count     int    `json:"count"`
+			} `json:"clusters"`
+		} `json:"tests"`
+	}
+	if err := json.Unmarshal([]byte(stdout.String()), &doc); err != nil {
+		t.Fatalf("--json did not emit valid JSON at %d configurations: %v", runs, err)
+	}
+
+	if doc.Configurations != runs {
+		t.Errorf("configurations = %d, want %d", doc.Configurations, runs)
+	}
+	// Every configuration was answered. A timeout here would mean the matrix
+	// generated something no recording was made under, and the numbers below
+	// would be measuring a smaller run than the one advertised.
+	if doc.Completed != runs || doc.TimedOut != 0 || doc.Errored != 0 {
+		t.Errorf("completed/timed out/errored = %d/%d/%d, want %d/0/0",
+			doc.Completed, doc.TimedOut, doc.Errored, runs)
+	}
+
+	var seenLoad bool
+	for _, e := range doc.Tests {
+		if e.Pass+e.Fail != runs {
+			t.Errorf("%s was observed in %d configurations, want %d", e.Name, e.Pass+e.Fail, runs)
+		}
+		total := 0
+		hashes := map[string]bool{}
+		for _, c := range e.Clusters {
+			total += c.Count
+			if hashes[c.Signature] {
+				t.Errorf("%s: signature %s appears in two clusters", e.Name, c.Signature)
+			}
+			hashes[c.Signature] = true
+		}
+		if total != e.Fail {
+			t.Errorf("%s: cluster counts sum to %d, want %d", e.Name, total, e.Fail)
+		}
+		if e.Name != "TestLoadDependent" {
+			continue
+		}
+		seenLoad = true
+		// A thousand configurations must not fragment one bug into a thousand
+		// clusters. The fixture produces exactly two distinct failure texts.
+		if len(e.Clusters) != 2 {
+			t.Errorf("TestLoadDependent has %d clusters at %d configurations, want 2; "+
+				"clustering is not collapsing repeats", len(e.Clusters), runs)
+		}
+	}
+	if !seenLoad {
+		t.Error("TestLoadDependent missing from the thousand-configuration report")
 	}
 }

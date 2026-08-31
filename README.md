@@ -27,7 +27,7 @@ flakescope [flags] <package>
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--runs N` | 20 | number of configurations to run |
+| `--runs N` | 20 | number of configurations to run; all distinct, see [Scale](#scale) |
 | `--json` | off | emit the machine-readable report instead of text |
 | `--timeout D` | 10m | per-configuration timeout |
 | `--verbose` | off | list every configuration behind each failure group |
@@ -210,6 +210,54 @@ tests" after twenty timeouts would be a lie told with a zero.
 
 From v1.0.0 the exit codes and the `--json` schema are a compatibility surface;
 changes to them will be additive only.
+
+## Scale
+
+flakescope generates every configuration distinctly. `--runs 1000` means a
+thousand different configurations, not a thousand invocations of forty of them,
+and a test enforces it: a repeated configuration costs a full `go test` and
+cannot change any count, rate or classification, so a matrix that quietly
+repeated itself would look identical to one that did not.
+
+Above the first handful of configurations the matrix scales by giving every run
+a shuffle seed no other run uses, cycling `GOMAXPROCS` through its candidates,
+and switching the race detector on for **one run in eight** rather than every
+other one. `-race` is the knob that dominates wall-clock and the one with the
+least to say - it answers a yes/no question, and a sample answers that as well
+as a census. For a race build costing 10x a plain one, alternating would make
+the matrix 5.5x a race-free run; one in eight makes it 2.1x.
+
+### Measured
+
+Against `testdata/flakypkg` on a 4-core linux/amd64 machine, Go 1.24.7,
+flakescope's default worker count (`NumCPU/2`, so 2):
+
+| Configurations | Cold | Warm |
+| --- | --- | --- |
+| 1000 | 197 s | 171 s |
+| 700 | - | 116 s |
+| 600 | - | 103 s |
+
+Cold means an empty `GOCACHE`, so the 26-second difference is the plain and
+race-instrumented standard library being built once and then amortised over a
+thousand runs.
+
+**A thousand configurations takes about three minutes warm, not two.** The
+largest round number that finishes inside two minutes on this machine is **700,
+at 116 seconds**. Both numbers are floors rather than forecasts: the fixture's
+tests do almost nothing, so nearly all of that time is the `go` tool starting up
+and linking. A package with real tests is dominated by its own test time, and
+1000 runs of it will take 1000 times however long one run takes, divided by the
+worker count.
+
+That 1000-configuration run is also what clustering is for. It produced 2,174
+individual failures across three tests, and reported them as four clusters:
+
+```
+TestLoadDependent   668 failures  ->  2 clusters (335 at GOMAXPROCS=4, 333 at GOMAXPROCS=2)
+TestOrderDependent  506 failures  ->  1 cluster
+TestAlwaysFails    1000 failures  ->  1 cluster
+```
 
 ## Development
 
