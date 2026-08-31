@@ -1,0 +1,6 @@
+{"ImportPath":"github.com/AarinB1/flakescope/testdata/flakypkg [github.com/AarinB1/flakescope/testdata/flakypkg.test]","Action":"build-output","Output":"# github.com/AarinB1/flakescope/testdata/flakypkg [github.com/AarinB1/flakescope/testdata/flakypkg.test]\n"}
+{"ImportPath":"github.com/AarinB1/flakescope/testdata/flakypkg [github.com/AarinB1/flakescope/testdata/flakypkg.test]","Action":"build-output","Output":"testdata/flakypkg/broken_test.go:6:17: cannot use 42 (untyped int constant) as string value in variable declaration\n"}
+{"ImportPath":"github.com/AarinB1/flakescope/testdata/flakypkg [github.com/AarinB1/flakescope/testdata/flakypkg.test]","Action":"build-fail"}
+{"Time":"2026-08-29T21:44:27.671395497Z","Action":"start","Package":"github.com/AarinB1/flakescope/testdata/flakypkg"}
+{"Time":"2026-08-29T21:44:27.671463377Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Output":"FAIL\tgithub.com/AarinB1/flakescope/testdata/flakypkg [build failed]\n"}
+{"Time":"2026-08-29T21:44:27.67147261Z","Action":"fail","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Elapsed":0,"FailedBuild":"github.com/AarinB1/flakescope/testdata/flakypkg [github.com/AarinB1/flakescope/testdata/flakypkg.test]"}
