@@ -31,11 +31,15 @@ reproduced the failure.
 
 flakescope varies configurations, not goroutine interleavings.
 
+A test's failures are grouped by normalized signature, and each group carries
+its own minimal reproducing configuration: a test that fails two different ways
+has two of them, and reporting one command line for both would hide a bug.
+
 Flags:
   --runs N          number of configurations to run (default 20)
   --json            emit the machine-readable report instead of text
   --timeout D       per-configuration timeout (default 10m)
-  --verbose         include failure output for each reported test
+  --verbose         list every configuration behind each failure group
 
 Exit codes:
   0   no flaky tests found
@@ -122,14 +126,22 @@ func goTest(ctx context.Context, opts options, configs []runner.Config) []runner
 	return newRunner(opts).Run(ctx, configs)
 }
 
-func run(args []string, stdout, stderr io.Writer, exec executor) int {
+// run is the whole CLI. base is the configuration the matrix is generated from
+// and that minimality is measured against; main passes runner.Default().
+//
+// It is a parameter rather than a call to runner.Default() in here because
+// Default reads runtime.NumCPU(). A test that cannot fix it is a test whose
+// matrix depends on the machine, and the fake would then be asked for
+// configurations no recording was made under - which it can only answer by
+// handing back a recording from a nearby one, fabricating results (CLAUDE.md
+// rule 5).
+func run(args []string, stdout, stderr io.Writer, base runner.Config, exec executor) int {
 	opts, err := parseFlags(args, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "flakescope: %v\n", err)
 		return report.ExitToolFailure
 	}
 
-	base := runner.Default()
 	// Setpgid puts each `go test` in its own process group so a timeout can
 	// SIGKILL the test binary, not just the go tool. That also isolates those
 	// processes from a terminal SIGINT, so this context must cancel on
@@ -155,5 +167,5 @@ func run(args []string, stdout, stderr io.Writer, exec executor) int {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, goTest))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, runner.Default(), goTest))
 }
