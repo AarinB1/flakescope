@@ -1,0 +1,23 @@
+{"Time":"2026-08-31T03:42:17.742155673Z","Action":"start","Package":"github.com/AarinB1/flakescope/testdata/flakypkg"}
+{"Time":"2026-08-31T03:42:17.745013366Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics"}
+{"Time":"2026-08-31T03:42:17.745074899Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"=== RUN   TestPanics\n"}
+{"Time":"2026-08-31T03:42:17.745097814Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"--- FAIL: TestPanics (0.00s)\n"}
+{"Time":"2026-08-31T03:42:17.747373031Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"panic: assignment to entry in nil map [recovered]\n"}
+{"Time":"2026-08-31T03:42:17.747385405Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"\tpanic: assignment to entry in nil map\n"}
+{"Time":"2026-08-31T03:42:17.747397644Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"\n"}
+{"Time":"2026-08-31T03:42:17.747402857Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"goroutine 18 [running]:\n"}
+{"Time":"2026-08-31T03:42:17.747408428Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"testing.tRunner.func1.2({0x550060, 0x6a2740})\n"}
+{"Time":"2026-08-31T03:42:17.74741252Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"\t/usr/local/go1.24.7/src/testing/testing.go:1734 +0x21c\n"}
+{"Time":"2026-08-31T03:42:17.747417883Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"testing.tRunner.func1()\n"}
+{"Time":"2026-08-31T03:42:17.747420961Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"\t/usr/local/go1.24.7/src/testing/testing.go:1737 +0x35e\n"}
+{"Time":"2026-08-31T03:42:17.747424613Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"panic({0x550060?, 0x6a2740?})\n"}
+{"Time":"2026-08-31T03:42:17.747432359Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"\t/usr/local/go1.24.7/src/runtime/panic.go:792 +0x132\n"}
+{"Time":"2026-08-31T03:42:17.747435471Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"github.com/AarinB1/flakescope/testdata/flakypkg.TestPanics(0xc000082700?)\n"}
+{"Time":"2026-08-31T03:42:17.747440113Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"\t/home/user/flakescope/testdata/flakypkg/crash_test.go:37 +0x28\n"}
+{"Time":"2026-08-31T03:42:17.747443388Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"testing.tRunner(0xc000082700, 0x584c00)\n"}
+{"Time":"2026-08-31T03:42:17.747445915Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"\t/usr/local/go1.24.7/src/testing/testing.go:1792 +0xf4\n"}
+{"Time":"2026-08-31T03:42:17.747448898Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"created by testing.(*T).Run in goroutine 1\n"}
+{"Time":"2026-08-31T03:42:17.747451843Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Output":"\t/usr/local/go1.24.7/src/testing/testing.go:1851 +0x413\n"}
+{"Time":"2026-08-31T03:42:17.748109764Z","Action":"fail","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPanics","Elapsed":0}
+{"Time":"2026-08-31T03:42:17.748142603Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Output":"FAIL\tgithub.com/AarinB1/flakescope/testdata/flakypkg\t0.006s\n"}
+{"Time":"2026-08-31T03:42:17.748167233Z","Action":"fail","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Elapsed":0.006}

@@ -1,0 +1,36 @@
+{"Time":"2026-08-31T03:42:18.777603701Z","Action":"start","Package":"github.com/AarinB1/flakescope/testdata/flakypkg"}
+{"Time":"2026-08-31T03:42:18.780110382Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Output":"-test.shuffle 1\n"}
+{"Time":"2026-08-31T03:42:18.78018991Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPoisonsGlobalState"}
+{"Time":"2026-08-31T03:42:18.780195305Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPoisonsGlobalState","Output":"=== RUN   TestPoisonsGlobalState\n"}
+{"Time":"2026-08-31T03:42:18.780256163Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPoisonsGlobalState","Output":"--- PASS: TestPoisonsGlobalState (0.00s)\n"}
+{"Time":"2026-08-31T03:42:18.780299712Z","Action":"pass","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestPoisonsGlobalState","Elapsed":0}
+{"Time":"2026-08-31T03:42:18.780307578Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses"}
+{"Time":"2026-08-31T03:42:18.780311601Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses","Output":"=== RUN   TestAlwaysPasses\n"}
+{"Time":"2026-08-31T03:42:18.780453519Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/add"}
+{"Time":"2026-08-31T03:42:18.780463262Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/add","Output":"=== RUN   TestAlwaysPasses/add\n"}
+{"Time":"2026-08-31T03:42:18.780505401Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/add","Output":"--- PASS: TestAlwaysPasses/add (0.00s)\n"}
+{"Time":"2026-08-31T03:42:18.780539656Z","Action":"pass","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/add","Elapsed":0}
+{"Time":"2026-08-31T03:42:18.780545931Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/multiply"}
+{"Time":"2026-08-31T03:42:18.780548449Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/multiply","Output":"=== RUN   TestAlwaysPasses/multiply\n"}
+{"Time":"2026-08-31T03:42:18.780594106Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/multiply","Output":"--- PASS: TestAlwaysPasses/multiply (0.00s)\n"}
+{"Time":"2026-08-31T03:42:18.780628055Z","Action":"pass","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses/multiply","Elapsed":0}
+{"Time":"2026-08-31T03:42:18.780636166Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses","Output":"--- PASS: TestAlwaysPasses (0.00s)\n"}
+{"Time":"2026-08-31T03:42:18.780671055Z","Action":"pass","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysPasses","Elapsed":0}
+{"Time":"2026-08-31T03:42:18.780679022Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestOrderDependent"}
+{"Time":"2026-08-31T03:42:18.780685026Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestOrderDependent","Output":"=== RUN   TestOrderDependent\n"}
+{"Time":"2026-08-31T03:42:18.78074155Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestOrderDependent","Output":"    flaky_test.go:62: global state was poisoned by an earlier test in this run\n"}
+{"Time":"2026-08-31T03:42:18.780790262Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestOrderDependent","Output":"--- FAIL: TestOrderDependent (0.00s)\n"}
+{"Time":"2026-08-31T03:42:18.780826938Z","Action":"fail","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestOrderDependent","Elapsed":0}
+{"Time":"2026-08-31T03:42:18.780833764Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysFails"}
+{"Time":"2026-08-31T03:42:18.780847419Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysFails","Output":"=== RUN   TestAlwaysFails\n"}
+{"Time":"2026-08-31T03:42:18.780914787Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysFails","Output":"    flaky_test.go:113: this test is broken in every configuration, which is not the same as flaky\n"}
+{"Time":"2026-08-31T03:42:18.780944451Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysFails","Output":"--- FAIL: TestAlwaysFails (0.00s)\n"}
+{"Time":"2026-08-31T03:42:18.78098004Z","Action":"fail","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestAlwaysFails","Elapsed":0}
+{"Time":"2026-08-31T03:42:18.780985959Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestLoadDependent"}
+{"Time":"2026-08-31T03:42:18.780988218Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestLoadDependent","Output":"=== RUN   TestLoadDependent\n"}
+{"Time":"2026-08-31T03:42:18.78110939Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestLoadDependent","Output":"    flaky_test.go:108: parallel execution exposed the bug: GOMAXPROCS=2\n"}
+{"Time":"2026-08-31T03:42:18.781116431Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestLoadDependent","Output":"--- FAIL: TestLoadDependent (0.00s)\n"}
+{"Time":"2026-08-31T03:42:18.781155384Z","Action":"fail","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestLoadDependent","Elapsed":0}
+{"Time":"2026-08-31T03:42:18.781161132Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Output":"FAIL\n"}
+{"Time":"2026-08-31T03:42:18.781621047Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Output":"FAIL\tgithub.com/AarinB1/flakescope/testdata/flakypkg\t0.004s\n"}
+{"Time":"2026-08-31T03:42:18.781648825Z","Action":"fail","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Elapsed":0.004}
