@@ -1218,3 +1218,75 @@ func TestClusterOutputComesFromTheMinimalRun(t *testing.T) {
 			"repro line names the single-processor one:\n%s", joined)
 	}
 }
+
+// TestAlwaysFailingTestIsClustered: a test that fails in every configuration is
+// deterministically broken, but it can still be broken in two different ways,
+// and the second one is invisible if only flaky tests get cluster output.
+//
+// Feeding only the two configurations where the load-dependent fixture fails
+// makes it always-fail while still producing its two distinct messages.
+func TestAlwaysFailingTestIsClustered(t *testing.T) {
+	base := runner.Config{GOMAXPROCS: 4, Count: 1}
+	rep := Build(fixturePkg, base, []runner.Result{
+		result(t, cfgFourP, "loadfail.json"),
+		result(t, cfgTwoP, "loadfail2.json"),
+	})
+	got := testByName(t, rep, "TestLoadDependent")
+
+	if got.Class != ClassAlwaysFails {
+		t.Fatalf("class = %v, want always-fails", got.Class)
+	}
+	if len(got.Clusters) != 2 {
+		t.Fatalf("clusters = %d, want 2\n%s", len(got.Clusters), describeClusters(got))
+	}
+
+	var b strings.Builder
+	if err := rep.WriteText(&b, false); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "ALWAYS FAILS") {
+		t.Fatalf("no always-fails section:\n%s", out)
+	}
+	for _, want := range []string{
+		"2 distinct failure signatures:",
+		"minimal repro: GOMAXPROCS=2 go test -count=1",
+		"minimal repro: GOMAXPROCS=4 go test -count=1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("always-fails section missing %q; a test broken two ways reports only one of them\n%s", want, out)
+		}
+	}
+}
+
+// TestVerboseListsEveryConfigurationInACluster pins what --verbose adds. Without
+// it a cluster shows one representative failure and one command line; with it,
+// every configuration that produced that signature is named.
+func TestVerboseListsEveryConfigurationInACluster(t *testing.T) {
+	base := runner.Config{GOMAXPROCS: 4, Count: 1}
+	rep := Build(fixturePkg, base, []runner.Result{
+		result(t, cfgFourPShuffled, "orderload.json"),
+		result(t, cfgFourP, "loadfail.json"),
+		result(t, cfgTwoP, "loadfail2.json"),
+		result(t, cfgSingleP, "singleproc.json"),
+	})
+
+	var quiet, loud strings.Builder
+	if err := rep.WriteText(&quiet, false); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	if err := rep.WriteText(&loud, true); err != nil {
+		t.Fatalf("WriteText(verbose): %v", err)
+	}
+
+	// The four-processor cluster holds two configurations: unshuffled and
+	// shuffled. Only the unshuffled one is its minimum, so the shuffled one
+	// appears nowhere without --verbose.
+	const other = "also: GOMAXPROCS=4 go test -shuffle=1 -count=1"
+	if strings.Contains(quiet.String(), other) {
+		t.Errorf("every configuration was listed without --verbose; that is what --verbose is for\n%s", quiet.String())
+	}
+	if !strings.Contains(loud.String(), other) {
+		t.Errorf("--verbose did not list the other configuration in the cluster\n%s", loud.String())
+	}
+}
