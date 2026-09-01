@@ -421,10 +421,16 @@ func TestLiveGroupMembers(t *testing.T) {
 	}
 
 	// A group whose leader is killed by pid, leaving the child it forked
-	// running. startFixture's cleanup kills the group afterwards, which is what
-	// keeps this row from leaking the sleeper it deliberately strands - and
-	// exercises that the cleanup reaps a grandchild, not just a leader.
-	orphaned := startFixture(t, "/bin/sh", "-c", "sleep 600")
+	// running. `sleep 600 & wait` is used rather than `sleep 600` because a
+	// last-command exec (bash, busybox ash, some dash builds) would replace
+	// the shell with sleep and leave a single process whose pid equals the
+	// pgid; waitForGroupMember would then time out against a fixture that
+	// never produced the leak. Backgrounding forces the fork; wait keeps the
+	// shell alive as the leader. startFixture's cleanup kills the group
+	// afterwards, which is what keeps this row from leaking the sleeper it
+	// deliberately strands - and exercises that the cleanup reaps a
+	// grandchild, not just a leader.
+	orphaned := startFixture(t, "/bin/sh", "-c", "sleep 600 & wait")
 	orphanedPGID := orphaned.Process.Pid
 	strandedPID := waitForGroupMember(t, orphanedPGID, orphanedPGID)
 	if err := orphaned.Process.Kill(); err != nil {
