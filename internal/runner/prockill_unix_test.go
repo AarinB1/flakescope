@@ -5,6 +5,7 @@ package runner
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,6 +20,10 @@ import (
 //
 // The fake is a shell script named `go`, not the go tool, so this does not
 // invoke `go test` (CLAUDE.md rule 2).
+//
+// The assertion is `!alive(pid)`, not `syscall.Kill(pid, 0) != nil`. See alive
+// for why those are different questions and why only the first one is the one
+// this test is asking.
 func TestTimeoutKillsProcessGroup(t *testing.T) {
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "child.pid")
@@ -73,8 +78,136 @@ func TestTimeoutKillsProcessGroup(t *testing.T) {
 		t.Fatal("Run did not return after the configuration timeout")
 	}
 
-	if err := syscall.Kill(pid, 0); err == nil {
+	if alive(pid) {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 		t.Fatalf("orphaned child process %d still running after the timeout", pid)
+	}
+}
+
+// alive reports whether pid names a process that is still RUNNING.
+//
+// syscall.Kill(pid, 0) cannot answer that question on its own. A SIGKILLed
+// orphan is reparented to PID 1, and where PID 1 is not a reaping init - which
+// is the normal case inside a container - it stays a zombie indefinitely. A
+// zombie still accepts signal 0, so a kill-only probe reports a process the
+// group kill did destroy as having survived it. That is a false failure, and it
+// is a false failure in the direction that hides nothing: it fires when the
+// runner is correct.
+//
+// Where /proc is available the state field separates the two: "Z" is
+// killed-but-unreaped, anything else is a process still holding resources.
+// Where it is not (macOS, the BSDs), PID 1 reaps orphans, so no zombie outlives
+// the kill and signal 0 is already exact.
+func alive(pid int) bool {
+	if err := syscall.Kill(pid, 0); err != nil {
+		return false
+	}
+	state, ok := procState(pid)
+	if !ok {
+		return true
+	}
+	return state != "Z"
+}
+
+// procState returns the single-letter state field from /proc/<pid>/stat, and
+// whether it could be read at all.
+func procState(pid int) (string, bool) {
+	b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return "", false
+	}
+	// Field 2 is the executable name in parentheses and may itself contain
+	// spaces and parentheses, so the state field is the first one after the
+	// LAST ')', not the third whitespace-separated token.
+	i := strings.LastIndexByte(string(b), ')')
+	if i < 0 {
+		return "", false
+	}
+	fields := strings.Fields(string(b)[i+1:])
+	if len(fields) == 0 {
+		return "", false
+	}
+	return fields[0], true
+}
+
+// TestAlive pins the distinction alive exists to make. The zombie row is the
+// one that matters: it fails against a kill-only probe, which is the bug this
+// helper replaced.
+func TestAlive(t *testing.T) {
+	// A child that has exited but has not been waited for is a zombie whose
+	// parent is this test binary, which is the same kernel state a SIGKILLed
+	// orphan under a non-reaping PID 1 ends up in.
+	zombie := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := zombie.Start(); err != nil {
+		t.Fatalf("starting the zombie's process: %v", err)
+	}
+	zombiePID := zombie.Process.Pid
+	defer func() { _ = zombie.Wait() }()
+	waitForState(t, zombiePID, "Z")
+
+	// A process that ran and was reaped leaves a PID that names nothing.
+	reaped := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := reaped.Start(); err != nil {
+		t.Fatalf("starting the reaped process: %v", err)
+	}
+	reapedPID := reaped.Process.Pid
+	if err := reaped.Wait(); err != nil {
+		t.Fatalf("waiting for the reaped process: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		pid  int
+		want bool
+		pins string
+	}{
+		{
+			name: "this process is running",
+			pid:  os.Getpid(),
+			want: true,
+			pins: "alive does not report every process as dead",
+		},
+		{
+			name: "an exited but unreaped child is not running",
+			pid:  zombiePID,
+			want: false,
+			pins: "a zombie still accepts signal 0; alive must not be fooled by that",
+		},
+		{
+			name: "a reaped child's pid names nothing",
+			pid:  reapedPID,
+			want: false,
+			pins: "the ordinary dead case still reads as dead",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.pid == zombiePID {
+				if _, ok := procState(tc.pid); !ok {
+					t.Skip("no /proc: on this platform PID 1 reaps orphans, so no zombie outlives a group kill")
+				}
+			}
+			if got := alive(tc.pid); got != tc.want {
+				t.Errorf("alive(%d) = %v, want %v; this row pins that %s", tc.pid, got, tc.want, tc.pins)
+			}
+		})
+	}
+}
+
+// waitForState blocks until pid reaches the given /proc state, so the zombie
+// row does not race the child's exit. It is a no-op where /proc is absent.
+func waitForState(t *testing.T, pid int, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		state, ok := procState(pid)
+		if !ok || state == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("process %d never reached state %q; it is %q", pid, want, state)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

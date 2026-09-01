@@ -2,6 +2,7 @@ package report
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/AarinB1/flakescope/internal/gotest"
 	"github.com/AarinB1/flakescope/internal/runner"
+	"github.com/AarinB1/flakescope/internal/signature"
 )
 
 const fixturePkg = "github.com/AarinB1/flakescope/testdata/flakypkg"
@@ -401,9 +403,16 @@ func TestDependence(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// dependence reads the configurations off Test.failures, which
+			// clustering also reads the output off. These rows are about
+			// configurations only, so the output is left empty.
+			failures := make([]failure, 0, len(tc.failedIn))
+			for _, cfg := range tc.failedIn {
+				failures = append(failures, failure{config: cfg})
+			}
 			got := dependence(Test{
 				Pass: len(tc.passedIn), Fail: len(tc.failedIn),
-				failedIn: tc.failedIn, passedIn: tc.passedIn,
+				failures: failures, passedIn: tc.passedIn,
 			})
 			if got != tc.want {
 				t.Errorf("dependence() = %v, want %v", got, tc.want)
@@ -824,5 +833,546 @@ func TestReportOrderIsStable(t *testing.T) {
 		if b.String() != first {
 			t.Fatal("two reports built from identical results differ")
 		}
+	}
+}
+
+// The two configurations the load-dependent failure was recorded under. Its
+// message names the processor count, so these two recordings carry textually
+// different failures from one cause - which is exactly the case clustering has
+// to have an answer for.
+var cfgTwoP = runner.Config{GOMAXPROCS: 2, Count: 1}
+
+// clusteredReport pairs every configuration with the recording made under that
+// exact configuration (CLAUDE.md rule 5). Answering the two-processor
+// configuration with the four-processor recording would put a failure that says
+// GOMAXPROCS=4 next to a repro line that says GOMAXPROCS=2.
+func clusteredReport(t *testing.T) Report {
+	t.Helper()
+	base := runner.Config{GOMAXPROCS: 4, Count: 1}
+	return Build(fixturePkg, base, []runner.Result{
+		result(t, cfgFourP, "loadfail.json"),
+		result(t, cfgTwoP, "loadfail2.json"),
+		result(t, cfgShuffled, "orderfail.json"),
+		result(t, cfgSingleP, "singleproc.json"),
+	})
+}
+
+// TestClustering is the v0.2.0 exit criterion at the report level.
+func TestClustering(t *testing.T) {
+	rep := clusteredReport(t)
+
+	tests := []struct {
+		name         string
+		pins         string
+		test         string
+		wantClusters int
+		wantCounts   []int
+	}{
+		{
+			name: "one cause reported two ways is two clusters",
+			pins: "PREFER SPLITTING: the message names the processor count and integers " +
+				"in messages are not normalized, so this one bug splits - visibly",
+			test:         "TestLoadDependent",
+			wantClusters: 2,
+			wantCounts:   []int{1, 1},
+		},
+		{
+			name:         "one failure mode is one cluster",
+			pins:         "the common case does not fragment",
+			test:         "TestOrderDependent",
+			wantClusters: 1,
+			wantCounts:   []int{1},
+		},
+		{
+			name:         "an always-failing test is clustered too",
+			pins:         "clusters are computed for every failing test, not only the flaky ones",
+			test:         "TestAlwaysFails",
+			wantClusters: 1,
+			wantCounts:   []int{4},
+		},
+		{
+			name:         "a test that never failed has no clusters",
+			pins:         "clustering does not invent a group for a passing test",
+			test:         "TestAlwaysPasses",
+			wantClusters: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := testByName(t, rep, tc.test)
+			if len(got.Clusters) != tc.wantClusters {
+				t.Fatalf("clusters = %d, want %d; this row pins that %s\n%s",
+					len(got.Clusters), tc.wantClusters, tc.pins, describeClusters(got))
+			}
+			for i, want := range tc.wantCounts {
+				if got.Clusters[i].Count != want {
+					t.Errorf("cluster %d count = %d, want %d\n%s",
+						i, got.Clusters[i].Count, want, describeClusters(got))
+				}
+			}
+			sum := 0
+			for _, c := range got.Clusters {
+				sum += c.Count
+			}
+			if sum != got.Fail {
+				t.Errorf("cluster counts sum to %d but the test failed %d times; a failure was dropped or double-counted",
+					sum, got.Fail)
+			}
+		})
+	}
+}
+
+func describeClusters(t Test) string {
+	var b strings.Builder
+	for _, c := range t.Clusters {
+		fmt.Fprintf(&b, "  [%s] n=%d minimal=%s\n%s\n", c.Signature.Hash, c.Count, c.Minimal, c.Signature.Normalized)
+	}
+	return b.String()
+}
+
+// TestClusterMinimalityIsPerCluster is the reason clustering is worth having at
+// all. TestLoadDependent has two failure modes; each has its own smallest
+// reproducing configuration, and reporting one of them for both would hand the
+// user a command line that cannot produce the failure printed beside it.
+func TestClusterMinimalityIsPerCluster(t *testing.T) {
+	got := testByName(t, clusteredReport(t), "TestLoadDependent")
+	if len(got.Clusters) != 2 {
+		t.Fatalf("clusters = %d, want 2\n%s", len(got.Clusters), describeClusters(got))
+	}
+
+	byProcs := map[int]Cluster{}
+	for _, c := range got.Clusters {
+		byProcs[c.Minimal.GOMAXPROCS] = c
+	}
+	for _, procs := range []int{2, 4} {
+		c, ok := byProcs[procs]
+		if !ok {
+			t.Fatalf("no cluster whose minimal configuration is GOMAXPROCS=%d\n%s", procs, describeClusters(got))
+		}
+		// The representative output must come from the minimal configuration's
+		// own run. If it came from any other run the report would print a
+		// failure and a command line that do not go together.
+		want := fmt.Sprintf("GOMAXPROCS=%d", procs)
+		if !strings.Contains(strings.Join(c.Output, ""), want) {
+			t.Errorf("cluster minimal at GOMAXPROCS=%d shows output that does not mention %q:\n%s",
+				procs, want, strings.Join(c.Output, ""))
+		}
+	}
+
+	// The test-level minimum is unchanged by clustering and is still chosen by
+	// the same ordering: base here is GOMAXPROCS=4, so the four-processor
+	// configuration changes no knobs at all and wins on the first tie-break,
+	// ahead of the two-processor one. Collapsing the clusters would have
+	// reported THAT configuration for both failure modes - and it cannot
+	// produce the GOMAXPROCS=2 failure at all.
+	if got.Minimal == nil || got.Minimal.GOMAXPROCS != 4 {
+		t.Errorf("test-level minimal = %v, want GOMAXPROCS=4 (zero knobs changed from base)", got.Minimal)
+	}
+	if byProcs[2].Minimal.GOMAXPROCS == got.Minimal.GOMAXPROCS {
+		t.Error("the two-processor cluster inherited the test-level minimum instead of its own")
+	}
+}
+
+// TestClusterOrderIsStable: Go randomises map iteration, so a clustering built
+// on a map has to sort before it is reported. Two builds of the same results
+// must name their clusters in the same order.
+func TestClusterOrderIsStable(t *testing.T) {
+	first := testByName(t, clusteredReport(t), "TestLoadDependent")
+	for i := 0; i < 20; i++ {
+		again := testByName(t, clusteredReport(t), "TestLoadDependent")
+		for j := range first.Clusters {
+			if first.Clusters[j].Signature.Hash != again.Clusters[j].Signature.Hash {
+				t.Fatalf("cluster order changed between builds at position %d: %s then %s",
+					j, first.Clusters[j].Signature.Hash, again.Clusters[j].Signature.Hash)
+			}
+		}
+	}
+}
+
+// TestClusterOrderIsByCount pins the ordering rule itself: most configurations
+// first, so the failure mode a user is most likely to hit is the one they read
+// first.
+func TestClusterOrderIsByCount(t *testing.T) {
+	base := runner.Config{GOMAXPROCS: 4, Count: 1}
+	rep := Build(fixturePkg, base, []runner.Result{
+		result(t, cfgTwoP, "loadfail2.json"),
+		result(t, cfgFourP, "loadfail.json"),
+		result(t, runner.Config{GOMAXPROCS: 4, ShuffleSeed: 1, Count: 1}, "orderload.json"),
+		result(t, cfgSingleP, "singleproc.json"),
+	})
+	got := testByName(t, rep, "TestLoadDependent")
+	if len(got.Clusters) != 2 {
+		t.Fatalf("clusters = %d, want 2\n%s", len(got.Clusters), describeClusters(got))
+	}
+	// Two four-processor recordings, one two-processor one.
+	if got.Clusters[0].Count != 2 || got.Clusters[1].Count != 1 {
+		t.Errorf("cluster counts = %d then %d, want 2 then 1 (descending)\n%s",
+			got.Clusters[0].Count, got.Clusters[1].Count, describeClusters(got))
+	}
+}
+
+// TestTextReportRendersClusters pins the human output described in the step:
+// a header with the hash and the count, then the representative failure, then
+// the minimal configuration - and, for the common case, no cluster block at all.
+func TestTextReportRendersClusters(t *testing.T) {
+	var b strings.Builder
+	if err := clusteredReport(t).WriteText(&b, false); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	out := b.String()
+
+	tests := []struct {
+		name string
+		pins string
+		want string
+	}{
+		{
+			name: "the split test announces its cluster count",
+			pins: "a user is told there is more than one failure mode",
+			want: "2 distinct failure signatures:",
+		},
+		{
+			name: "each cluster names its own repro",
+			pins: "minimality is per cluster in the output, not only in the data",
+			want: "minimal repro: GOMAXPROCS=2 go test -count=1",
+		},
+		{
+			name: "the other cluster names the other repro",
+			pins: "both minimal configurations are printed, not just the smallest",
+			want: "minimal repro: GOMAXPROCS=4 go test -count=1",
+		},
+		{
+			name: "the representative failure is shown",
+			pins: "the user sees what the failure looks like without --verbose",
+			want: "parallel execution exposed the bug: GOMAXPROCS=2",
+		},
+		{
+			name: "the single-signature case says so plainly",
+			pins: "the common case reads simply instead of printing a cluster of one",
+			want: "all failures share one signature (",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("output missing %q; this row pins that %s\n%s", tc.want, tc.pins, out)
+			}
+		})
+	}
+
+	// A cluster of one must never be printed as a cluster block.
+	if strings.Contains(out, "1 distinct failure signatures") {
+		t.Errorf("a single-signature test was printed as a cluster block:\n%s", out)
+	}
+}
+
+// TestJSONClustersAreAdditive: the schema freezes at v1.0.0 and clusters land
+// now precisely so they are not a breaking change later. Every v0.1.0 field has
+// to survive.
+func TestJSONClustersAreAdditive(t *testing.T) {
+	raw, err := json.Marshal(clusteredReport(t))
+	if err != nil {
+		t.Fatalf("marshalling: %v", err)
+	}
+
+	var doc struct {
+		Tests []map[string]json.RawMessage `json:"tests"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshalling: %v", err)
+	}
+
+	// Every field a v0.1.0 consumer could read.
+	v0Fields := []string{
+		"package", "name", "pass", "fail", "skip", "incomplete",
+		"failure_rate", "classification",
+	}
+	for _, tst := range doc.Tests {
+		for _, f := range v0Fields {
+			if _, ok := tst[f]; !ok {
+				t.Errorf("v0.1.0 field %q missing from a test entry: %v", f, tst)
+			}
+		}
+		if _, ok := tst["clusters"]; !ok {
+			t.Errorf("clusters missing from a test entry; it is present even when empty: %v", tst)
+		}
+	}
+
+	var typed struct {
+		Tests []struct {
+			Name     string `json:"name"`
+			Fail     int    `json:"fail"`
+			Clusters []struct {
+				Signature string `json:"signature"`
+				Kind      string `json:"kind"`
+				Count     int    `json:"count"`
+				Minimal   struct {
+					GOMAXPROCS  int    `json:"gomaxprocs"`
+					CommandLine string `json:"command_line"`
+				} `json:"minimal_config"`
+				Output []string `json:"representative_output"`
+			} `json:"clusters"`
+		} `json:"tests"`
+	}
+	if err := json.Unmarshal(raw, &typed); err != nil {
+		t.Fatalf("unmarshalling the documented schema: %v", err)
+	}
+
+	seen := false
+	for _, tst := range typed.Tests {
+		total := 0
+		for _, c := range tst.Clusters {
+			total += c.Count
+			if c.Signature == "" || c.Kind == "" || c.Minimal.CommandLine == "" {
+				t.Errorf("%s: incomplete cluster %+v", tst.Name, c)
+			}
+		}
+		if total != tst.Fail {
+			t.Errorf("%s: cluster counts sum to %d, want %d", tst.Name, total, tst.Fail)
+		}
+		if tst.Name != "TestLoadDependent" {
+			continue
+		}
+		seen = true
+		if len(tst.Clusters) != 2 {
+			t.Fatalf("TestLoadDependent has %d clusters in the JSON, want 2", len(tst.Clusters))
+		}
+		procs := []int{tst.Clusters[0].Minimal.GOMAXPROCS, tst.Clusters[1].Minimal.GOMAXPROCS}
+		if procs[0] == procs[1] {
+			t.Errorf("both clusters report the same minimal configuration (GOMAXPROCS=%d); "+
+				"per-cluster minimality is the point of the field", procs[0])
+		}
+		if len(tst.Clusters[0].Output) == 0 {
+			t.Error("cluster carries no representative output")
+		}
+	}
+	if !seen {
+		t.Error("TestLoadDependent missing from the JSON report")
+	}
+}
+
+var cfgFourPShuffled = runner.Config{GOMAXPROCS: 4, ShuffleSeed: 1, Count: 1}
+
+// TestClusterMinimalIsMinimisedWithinTheCluster: a cluster holding more than
+// one configuration must MINIMISE across them, not keep whichever it saw first.
+//
+// The shuffled configuration is fed in first and is not the smallest. A cluster
+// that kept its first failure would tell the user to run `-shuffle=1` to
+// reproduce a failure that needs no shuffle at all - a repro that is both
+// larger than necessary and misleading about what the bug depends on.
+func TestClusterMinimalIsMinimisedWithinTheCluster(t *testing.T) {
+	base := runner.Config{GOMAXPROCS: 4, Count: 1}
+	rep := Build(fixturePkg, base, []runner.Result{
+		result(t, cfgFourPShuffled, "orderload.json"),
+		result(t, cfgFourP, "loadfail.json"),
+		result(t, cfgSingleP, "singleproc.json"),
+	})
+	got := testByName(t, rep, "TestLoadDependent")
+
+	if len(got.Clusters) != 1 {
+		t.Fatalf("clusters = %d, want 1; both recordings report the same failure\n%s",
+			len(got.Clusters), describeClusters(got))
+	}
+	if got.Clusters[0].Count != 2 {
+		t.Fatalf("cluster count = %d, want 2", got.Clusters[0].Count)
+	}
+	if got.Clusters[0].Minimal.Shuffled() {
+		t.Errorf("cluster minimal = %s, want the unshuffled configuration; "+
+			"the cluster kept its first failure instead of minimising within itself",
+			got.Clusters[0].Minimal)
+	}
+}
+
+// TestClusterOutputComesFromTheMinimalRun: the report prints a failure and a
+// command line next to each other, and they must be the same run.
+//
+// The two panic recordings hash identically - that is the exit criterion - but
+// their raw text differs in goroutine ID and heap addresses. The four-processor
+// one is fed in first and is not the minimal configuration, so a cluster that
+// kept the first output it saw would print a stack from a run the command line
+// beside it does not describe.
+func TestClusterOutputComesFromTheMinimalRun(t *testing.T) {
+	base := runner.Config{GOMAXPROCS: 1, Count: 1}
+	rep := Build(fixturePkg, base, []runner.Result{
+		result(t, cfgFourP, "panic4.json"),
+		result(t, cfgSingleP, "panic1.json"),
+	})
+	got := testByName(t, rep, "TestPanics")
+
+	if len(got.Clusters) != 1 {
+		t.Fatalf("clusters = %d, want 1; one panic recorded twice is one cluster\n%s",
+			len(got.Clusters), describeClusters(got))
+	}
+	c := got.Clusters[0]
+	if c.Minimal.GOMAXPROCS != 1 {
+		t.Fatalf("cluster minimal = %s, want GOMAXPROCS=1", c.Minimal)
+	}
+
+	// panic1.json's stack; panic4.json's says goroutine 18.
+	joined := strings.Join(c.Output, "")
+	if !strings.Contains(joined, "goroutine 6 [running]") {
+		t.Errorf("representative output is not from the minimal run:\n%s", joined)
+	}
+	if strings.Contains(joined, "goroutine 18 [running]") {
+		t.Errorf("representative output came from the four-processor run while the "+
+			"repro line names the single-processor one:\n%s", joined)
+	}
+}
+
+// TestAlwaysFailingTestIsClustered: a test that fails in every configuration is
+// deterministically broken, but it can still be broken in two different ways,
+// and the second one is invisible if only flaky tests get cluster output.
+//
+// Feeding only the two configurations where the load-dependent fixture fails
+// makes it always-fail while still producing its two distinct messages.
+func TestAlwaysFailingTestIsClustered(t *testing.T) {
+	base := runner.Config{GOMAXPROCS: 4, Count: 1}
+	rep := Build(fixturePkg, base, []runner.Result{
+		result(t, cfgFourP, "loadfail.json"),
+		result(t, cfgTwoP, "loadfail2.json"),
+	})
+	got := testByName(t, rep, "TestLoadDependent")
+
+	if got.Class != ClassAlwaysFails {
+		t.Fatalf("class = %v, want always-fails", got.Class)
+	}
+	if len(got.Clusters) != 2 {
+		t.Fatalf("clusters = %d, want 2\n%s", len(got.Clusters), describeClusters(got))
+	}
+
+	var b strings.Builder
+	if err := rep.WriteText(&b, false); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "ALWAYS FAILS") {
+		t.Fatalf("no always-fails section:\n%s", out)
+	}
+	for _, want := range []string{
+		"2 distinct failure signatures:",
+		"minimal repro: GOMAXPROCS=2 go test -count=1",
+		"minimal repro: GOMAXPROCS=4 go test -count=1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("always-fails section missing %q; a test broken two ways reports only one of them\n%s", want, out)
+		}
+	}
+}
+
+// TestVerboseListsEveryConfigurationInACluster pins what --verbose adds. Without
+// it a cluster shows one representative failure and one command line; with it,
+// every configuration that produced that signature is named.
+func TestVerboseListsEveryConfigurationInACluster(t *testing.T) {
+	base := runner.Config{GOMAXPROCS: 4, Count: 1}
+	rep := Build(fixturePkg, base, []runner.Result{
+		result(t, cfgFourPShuffled, "orderload.json"),
+		result(t, cfgFourP, "loadfail.json"),
+		result(t, cfgTwoP, "loadfail2.json"),
+		result(t, cfgSingleP, "singleproc.json"),
+	})
+
+	var quiet, loud strings.Builder
+	if err := rep.WriteText(&quiet, false); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	if err := rep.WriteText(&loud, true); err != nil {
+		t.Fatalf("WriteText(verbose): %v", err)
+	}
+
+	// The four-processor cluster holds two configurations: unshuffled and
+	// shuffled. Only the unshuffled one is its minimum, so the shuffled one
+	// appears nowhere without --verbose.
+	const other = "also: GOMAXPROCS=4 go test -shuffle=1 -count=1"
+	if strings.Contains(quiet.String(), other) {
+		t.Errorf("every configuration was listed without --verbose; that is what --verbose is for\n%s", quiet.String())
+	}
+	if !strings.Contains(loud.String(), other) {
+		t.Errorf("--verbose did not list the other configuration in the cluster\n%s", loud.String())
+	}
+}
+
+// TestVerboseListsConfigurationsForASingleSignature is the fixture that breaks
+// a --verbose that only lists members inside writeClusters. One signature is
+// the common case and never enters that function.
+func TestVerboseListsConfigurationsForASingleSignature(t *testing.T) {
+	min := runner.Config{GOMAXPROCS: 4, Count: 1}
+	other := runner.Config{GOMAXPROCS: 4, ShuffleSeed: 1, Count: 1}
+	const also = "also: GOMAXPROCS=4 go test -shuffle=1 -count=1"
+
+	tests := []struct {
+		name string
+		pins string
+		rep  Report
+	}{
+		{
+			name: "flaky, one signature",
+			pins: "the common path lists members; writeClusters is not the only --verbose path",
+			rep: Report{
+				Package:        "example.com/p",
+				Configurations: 3,
+				Completed:      3,
+				Tests: []Test{{
+					Package:    "example.com/p",
+					Name:       "TestOneCause",
+					Pass:       1,
+					Fail:       2,
+					Class:      ClassFlaky,
+					Dependence: DependenceLoad,
+					Minimal:    &min,
+					Clusters: []Cluster{{
+						Signature: signature.Signature{Hash: "aaaaaaaaaaaaaaaa"},
+						Count:     2,
+						Minimal:   min,
+						configs:   []runner.Config{other, min},
+					}},
+				}},
+			},
+		},
+		{
+			name: "always-fails, one signature",
+			pins: "always-fails uses the same one-signature verbose path",
+			rep: Report{
+				Package:        "example.com/p",
+				Configurations: 2,
+				Completed:      2,
+				Tests: []Test{{
+					Package: "example.com/p",
+					Name:    "TestBroken",
+					Fail:    2,
+					Class:   ClassAlwaysFails,
+					Clusters: []Cluster{{
+						Signature: signature.Signature{Hash: "bbbbbbbbbbbbbbbb"},
+						Count:     2,
+						Minimal:   min,
+						configs:   []runner.Config{other, min},
+					}},
+				}},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var quiet, loud strings.Builder
+			if err := tc.rep.WriteText(&quiet, false); err != nil {
+				t.Fatalf("WriteText: %v", err)
+			}
+			if err := tc.rep.WriteText(&loud, true); err != nil {
+				t.Fatalf("WriteText(verbose): %v", err)
+			}
+			if strings.Contains(quiet.String(), "distinct failure signatures") {
+				t.Fatalf("a one-signature test was printed as a cluster block; this row pins that %s\n%s",
+					tc.pins, quiet.String())
+			}
+			if strings.Contains(quiet.String(), also) {
+				t.Errorf("every configuration was listed without --verbose; that is what --verbose is for\n%s",
+					quiet.String())
+			}
+			if !strings.Contains(loud.String(), also) {
+				t.Errorf("--verbose did not list the other configuration; this row pins that %s\n%s",
+					tc.pins, loud.String())
+			}
+		})
 	}
 }

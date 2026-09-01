@@ -31,11 +31,15 @@ reproduced the failure.
 
 flakescope varies configurations, not goroutine interleavings.
 
+A test's failures are grouped by normalized signature, and each group carries
+its own minimal reproducing configuration: a test that fails two different ways
+has two of them, and reporting one command line for both would hide a bug.
+
 Flags:
   --runs N          number of configurations to run (default 20)
   --json            emit the machine-readable report instead of text
   --timeout D       per-configuration timeout (default 10m)
-  --verbose         include failure output for each reported test
+  --verbose         list every configuration behind each failure group
 
 Exit codes:
   0   no flaky tests found
@@ -69,7 +73,7 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	// not kill runs the go tool would have let finish and then report them as
 	// timeouts of its own making.
 	fs.DurationVar(&opts.timeout, "timeout", 10*time.Minute, "per-configuration timeout")
-	fs.BoolVar(&opts.verbose, "verbose", false, "include failure output")
+	fs.BoolVar(&opts.verbose, "verbose", false, "list every configuration behind each failure group")
 
 	if err := fs.Parse(args); err != nil {
 		return opts, fmt.Errorf("%w: %v", errUsage, err)
@@ -100,20 +104,44 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 // implementation that reaches a process.
 type executor func(ctx context.Context, opts options, configs []runner.Config) []runner.Result
 
-func goTest(ctx context.Context, opts options, configs []runner.Config) []runner.Result {
+// newRunner builds the runner goTest will use.
+//
+// It is split out from goTest so that a test can assert the parsed flags reach
+// the runner without invoking `go test` (CLAUDE.md rule 2). This is the seam
+// between what a user types and everything the tool does: a --timeout that
+// stopped being propagated, or a package string that arrived wrong, would
+// change every result flakescope produces while leaving a suite that replays
+// recorded streams entirely green.
+//
+// Dir is deliberately left at its zero value, which means the caller's working
+// directory. flakescope resolves the package the same way the user's own
+// `go test` would.
+func newRunner(opts options) *runner.Runner {
 	r := runner.New(opts.pkg)
 	r.Timeout = opts.timeout
-	return r.Run(ctx, configs)
+	return r
 }
 
-func run(args []string, stdout, stderr io.Writer, exec executor) int {
+func goTest(ctx context.Context, opts options, configs []runner.Config) []runner.Result {
+	return newRunner(opts).Run(ctx, configs)
+}
+
+// run is the whole CLI. base is the configuration the matrix is generated from
+// and that minimality is measured against; main passes runner.Default().
+//
+// It is a parameter rather than a call to runner.Default() in here because
+// Default reads runtime.NumCPU(). A test that cannot fix it is a test whose
+// matrix depends on the machine, and the fake would then be asked for
+// configurations no recording was made under - which it can only answer by
+// handing back a recording from a nearby one, fabricating results (CLAUDE.md
+// rule 5).
+func run(args []string, stdout, stderr io.Writer, base runner.Config, exec executor) int {
 	opts, err := parseFlags(args, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "flakescope: %v\n", err)
 		return report.ExitToolFailure
 	}
 
-	base := runner.Default()
 	// Setpgid puts each `go test` in its own process group so a timeout can
 	// SIGKILL the test binary, not just the go tool. That also isolates those
 	// processes from a terminal SIGINT, so this context must cancel on
@@ -139,5 +167,5 @@ func run(args []string, stdout, stderr io.Writer, exec executor) int {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, goTest))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, runner.Default(), goTest))
 }

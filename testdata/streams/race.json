@@ -1,0 +1,62 @@
+{"Time":"2026-08-31T03:42:18.218121993Z","Action":"start","Package":"github.com/AarinB1/flakescope/testdata/flakypkg"}
+{"Time":"2026-08-31T03:42:18.233509304Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces"}
+{"Time":"2026-08-31T03:42:18.233544034Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"=== RUN   TestRaces\n"}
+{"Time":"2026-08-31T03:42:18.234909839Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"==================\n"}
+{"Time":"2026-08-31T03:42:18.23492595Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"WARNING: DATA RACE\n"}
+{"Time":"2026-08-31T03:42:18.234929493Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"Read at 0x00c0001922a8 by goroutine 9:\n"}
+{"Time":"2026-08-31T03:42:18.234934876Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"  github.com/AarinB1/flakescope/testdata/flakypkg.TestRaces.func1()\n"}
+{"Time":"2026-08-31T03:42:18.234937976Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"      /home/user/flakescope/testdata/flakypkg/crash_test.go:52 +0x84\n"}
+{"Time":"2026-08-31T03:42:18.234940658Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"\n"}
+{"Time":"2026-08-31T03:42:18.234944132Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"Previous write at 0x00c0001922a8 by goroutine 10:\n"}
+{"Time":"2026-08-31T03:42:18.234948476Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"  github.com/AarinB1/flakescope/testdata/flakypkg.TestRaces.func1()\n"}
+{"Time":"2026-08-31T03:42:18.234951146Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"      /home/user/flakescope/testdata/flakypkg/crash_test.go:52 +0x96\n"}
+{"Time":"2026-08-31T03:42:18.234954087Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"\n"}
+{"Time":"2026-08-31T03:42:18.234956431Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"Goroutine 9 (running) created at:\n"}
+{"Time":"2026-08-31T03:42:18.23495895Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"  github.com/AarinB1/flakescope/testdata/flakypkg.TestRaces()\n"}
+{"Time":"2026-08-31T03:42:18.234961998Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"      /home/user/flakescope/testdata/flakypkg/crash_test.go:50 +0x84\n"}
+{"Time":"2026-08-31T03:42:18.234964439Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"  testing.tRunner()\n"}
+{"Time":"2026-08-31T03:42:18.234966908Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"      /usr/local/go1.24.7/src/testing/testing.go:1792 +0x225\n"}
+{"Time":"2026-08-31T03:42:18.234969577Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"  testing.(*T).Run.gowrap1()\n"}
+{"Time":"2026-08-31T03:42:18.234972001Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"      /usr/local/go1.24.7/src/testing/testing.go:1851 +0x44\n"}
+{"Time":"2026-08-31T03:42:18.23497427Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"\n"}
+{"Time":"2026-08-31T03:42:18.234976634Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"Goroutine 10 (finished) created at:\n"}
+{"Time":"2026-08-31T03:42:18.234978944Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"  github.com/AarinB1/flakescope/testdata/flakypkg.TestRaces()\n"}
+{"Time":"2026-08-31T03:42:18.234991935Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"      /home/user/flakescope/testdata/flakypkg/crash_test.go:50 +0x84\n"}
+{"Time":"2026-08-31T03:42:18.234994723Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"  testing.tRunner()\n"}
+{"Time":"2026-08-31T03:42:18.234997291Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"      /usr/local/go1.24.7/src/testing/testing.go:1792 +0x225\n"}
+{"Time":"2026-08-31T03:42:18.235000192Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"  testing.(*T).Run.gowrap1()\n"}
+{"Time":"2026-08-31T03:42:18.23500249Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"      /usr/local/go1.24.7/src/testing/testing.go:1851 +0x44\n"}
+{"Time":"2026-08-31T03:42:18.235004941Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"==================\n"}
+{"Time":"2026-08-31T03:42:18.235011117Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"==================\n"}
+{"Time":"2026-08-31T03:42:18.235013524Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"WARNING: DATA RACE\n"}
+{"Time":"2026-08-31T03:42:18.235015855Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"Write at 0x00c0001922a8 by goroutine 11:\n"}
+{"Time":"2026-08-31T03:42:18.235019367Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"  github.com/AarinB1/flakescope/testdata/flakypkg.TestRaces.func1()\n"}
+{"Time":"2026-08-31T03:42:18.23502185Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"      /home/user/flakescope/testdata/flakypkg/crash_test.go:52 +0x96\n"}
+{"Time":"2026-08-31T03:42:18.235024144Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"\n"}
+{"Time":"2026-08-31T03:42:18.235026357Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"Previous write at 0x00c0001922a8 by goroutine 9:\n"}
+{"Time":"2026-08-31T03:42:18.235028734Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"  github.com/AarinB1/flakescope/testdata/flakypkg.TestRaces.func1()\n"}
+{"Time":"2026-08-31T03:42:18.235030986Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"      /home/user/flakescope/testdata/flakypkg/crash_test.go:52 +0x96\n"}
+{"Time":"2026-08-31T03:42:18.235033121Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"\n"}
+{"Time":"2026-08-31T03:42:18.235035225Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"Goroutine 11 (running) created at:\n"}
+{"Time":"2026-08-31T03:42:18.235037501Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"  github.com/AarinB1/flakescope/testdata/flakypkg.TestRaces()\n"}
+{"Time":"2026-08-31T03:42:18.235040018Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"      /home/user/flakescope/testdata/flakypkg/crash_test.go:50 +0x84\n"}
+{"Time":"2026-08-31T03:42:18.235042542Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"  testing.tRunner()\n"}
+{"Time":"2026-08-31T03:42:18.235044941Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"      /usr/local/go1.24.7/src/testing/testing.go:1792 +0x225\n"}
+{"Time":"2026-08-31T03:42:18.235049773Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"  testing.(*T).Run.gowrap1()\n"}
+{"Time":"2026-08-31T03:42:18.235054791Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"      /usr/local/go1.24.7/src/testing/testing.go:1851 +0x44\n"}
+{"Time":"2026-08-31T03:42:18.235057109Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"\n"}
+{"Time":"2026-08-31T03:42:18.235059618Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"Goroutine 9 (finished) created at:\n"}
+{"Time":"2026-08-31T03:42:18.235062201Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"  github.com/AarinB1/flakescope/testdata/flakypkg.TestRaces()\n"}
+{"Time":"2026-08-31T03:42:18.235064796Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"      /home/user/flakescope/testdata/flakypkg/crash_test.go:50 +0x84\n"}
+{"Time":"2026-08-31T03:42:18.235067307Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"  testing.tRunner()\n"}
+{"Time":"2026-08-31T03:42:18.235069856Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"      /usr/local/go1.24.7/src/testing/testing.go:1792 +0x225\n"}
+{"Time":"2026-08-31T03:42:18.235072122Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"  testing.(*T).Run.gowrap1()\n"}
+{"Time":"2026-08-31T03:42:18.235074575Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"      /usr/local/go1.24.7/src/testing/testing.go:1851 +0x44\n"}
+{"Time":"2026-08-31T03:42:18.235077075Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"==================\n"}
+{"Time":"2026-08-31T03:42:18.235261536Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"    crash_test.go:56: counter reached 4\n"}
+{"Time":"2026-08-31T03:42:18.235302151Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"    testing.go:1490: race detected during execution of test\n"}
+{"Time":"2026-08-31T03:42:18.235364562Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Output":"--- FAIL: TestRaces (0.00s)\n"}
+{"Time":"2026-08-31T03:42:18.235491888Z","Action":"fail","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestRaces","Elapsed":0}
+{"Time":"2026-08-31T03:42:18.235963042Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Output":"FAIL\n"}
+{"Time":"2026-08-31T03:42:18.237538959Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Output":"FAIL\tgithub.com/AarinB1/flakescope/testdata/flakypkg\t0.019s\n"}
+{"Time":"2026-08-31T03:42:18.237557336Z","Action":"fail","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Elapsed":0.019}

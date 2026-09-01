@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"fmt"
 	"reflect"
 	"runtime"
 	"strings"
@@ -255,6 +256,136 @@ func TestMatrixReachesEveryGOMAXPROCSCandidate(t *testing.T) {
 	for procs, seen := range want {
 		if !seen {
 			t.Errorf("a 20-run matrix never tries GOMAXPROCS=%d", procs)
+		}
+	}
+}
+
+// TestMatrixAtScale is the claim that "--runs 1000" means a thousand runs.
+//
+// The failure this exists to catch is silent: a matrix that repeats itself
+// produces a report indistinguishable from one that did not, because a repeated
+// configuration cannot change a count, a rate or a classification. It would just
+// mean a thousand `go test` invocations bought forty configurations' worth of
+// information, and nothing anywhere would say so.
+func TestMatrixAtScale(t *testing.T) {
+	bases := []struct {
+		name string
+		base Config
+	}{
+		{"default-shaped base", Config{GOMAXPROCS: 8, Count: 1}},
+		{"base GOMAXPROCS coincides with a candidate", Config{GOMAXPROCS: 2, Count: 1}},
+		{"base already shuffled", Config{ShuffleSeed: 5, GOMAXPROCS: 4, Count: 1}},
+		{"base already racing", Config{GOMAXPROCS: 1, Race: true, Count: 1}},
+		{"single processor base", Config{GOMAXPROCS: 1, Count: 1}},
+	}
+	sizes := []int{50, 200, 1000}
+
+	for _, b := range bases {
+		for _, n := range sizes {
+			t.Run(fmt.Sprintf("%s/%d", b.name, n), func(t *testing.T) {
+				got := Matrix(b.base, n)
+				if len(got) != n {
+					t.Fatalf("Matrix returned %d configurations, want %d", len(got), n)
+				}
+
+				seen := make(map[Config]int, n)
+				for i, cfg := range got {
+					if first, dup := seen[cfg]; dup {
+						t.Fatalf("configuration %d repeats configuration %d: %s\n"+
+							"a repeated run costs a full `go test` and buys no information",
+							i, first, cfg)
+					}
+					seen[cfg] = i
+					if cfg.Count != b.base.Count {
+						t.Fatalf("configuration %d varied Count to %d; Count is not an axis", i, cfg.Count)
+					}
+					if cfg.GOMAXPROCS < 1 {
+						t.Fatalf("configuration %d has GOMAXPROCS=%d", i, cfg.GOMAXPROCS)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestMatrixRationsTheRaceDetector: -race dominates wall-clock, so it is
+// sampled rather than alternated. Half the matrix racing would spend most of a
+// thousand-run's time on the axis with the least to say.
+func TestMatrixRationsTheRaceDetector(t *testing.T) {
+	// A band, not a ceiling. Too much race and a thousand runs spend their time
+	// on the axis with the least to say; too little and the axis is a token
+	// rather than a sample - and the load-dependence rule that reads it needs
+	// enough race runs to have something to compare.
+	tests := []struct {
+		name             string
+		base             Config
+		n                int
+		wantMin, wantMax float64
+	}{
+		{name: "a thousand runs", base: Config{GOMAXPROCS: 8, Count: 1}, n: 1000, wantMin: 0.05, wantMax: 0.20},
+		{name: "two hundred runs", base: Config{GOMAXPROCS: 8, Count: 1}, n: 200, wantMin: 0.05, wantMax: 0.20},
+		{name: "fifty runs", base: Config{GOMAXPROCS: 4, Count: 1}, n: 50, wantMin: 0.04, wantMax: 0.25},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Matrix(tc.base, tc.n)
+			raced := 0
+			for _, cfg := range got {
+				if cfg.Race {
+					raced++
+				}
+			}
+			frac := float64(raced) / float64(len(got))
+			if frac > tc.wantMax {
+				t.Errorf("%d/%d configurations race (%.0f%%), want at most %.0f%%; "+
+					"the race detector is meant to be sampled, not alternated",
+					raced, len(got), frac*100, tc.wantMax*100)
+			}
+			if frac < tc.wantMin {
+				t.Errorf("only %d/%d configurations race (%.1f%%), want at least %.0f%%; "+
+					"the race detector is meant to be sampled, not reduced to a token",
+					raced, len(got), frac*100, tc.wantMin*100)
+			}
+		})
+	}
+}
+
+// TestMatrixSpreadsSeedsAndCyclesProcessors pins the other two halves of the
+// scale rule. Without distinct seeds the matrix cannot stay duplicate-free at
+// size; without cycling GOMAXPROCS a thousand runs would all sit at one
+// processor count.
+func TestMatrixSpreadsSeedsAndCyclesProcessors(t *testing.T) {
+	base := Config{GOMAXPROCS: 8, Count: 1}
+	const n = 1000
+	got := Matrix(base, n)
+
+	seeds := make(map[int64]bool, n)
+	procs := map[int]int{}
+	for _, cfg := range got {
+		procs[cfg.GOMAXPROCS]++
+		if cfg.Shuffled() {
+			if seeds[cfg.ShuffleSeed] {
+				t.Fatalf("shuffle seed %d is used twice", cfg.ShuffleSeed)
+			}
+			seeds[cfg.ShuffleSeed] = true
+		}
+	}
+
+	// Nearly every configuration should carry a seed of its own; only the
+	// coverage prefix runs unshuffled.
+	if len(seeds) < n-len(procs)-2 {
+		t.Errorf("only %d distinct shuffle seeds across %d configurations", len(seeds), n)
+	}
+	for _, want := range []int{1, 2, 4, 8} {
+		if procs[want] == 0 {
+			t.Errorf("a %d-run matrix never tries GOMAXPROCS=%d", n, want)
+		}
+	}
+	// Cycling, not clustering: no single processor count may dominate.
+	for value, count := range procs {
+		if float64(count)/float64(n) > 0.5 {
+			t.Errorf("GOMAXPROCS=%d accounts for %d/%d configurations; the axis is not being cycled",
+				value, count, n)
 		}
 	}
 }
