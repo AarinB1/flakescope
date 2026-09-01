@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -118,20 +119,14 @@ func waitUntilDead(pid int, d time.Duration) bool {
 // must still be reported as such, because that report is what fails
 // TestTimeoutKillsProcessGroup for a runner that leaked the process group.
 func TestWaitUntilDead(t *testing.T) {
-	live := exec.Command("/bin/sh", "-c", "sleep 600")
-	if err := live.Start(); err != nil {
-		t.Fatalf("starting the live process: %v", err)
-	}
+	// `sh -c "sleep 600"` is two processes, not one: dash forks the sleeper
+	// and waits for it. The shape is kept deliberately, because it is the
+	// shape that leaked, and keeping it is what makes startFixture's group
+	// cleanup load bearing here rather than decorative.
+	live := startFixture(t, "/bin/sh", "-c", "sleep 600")
 	livePID := live.Process.Pid
-	defer func() {
-		_ = live.Process.Kill()
-		_ = live.Wait()
-	}()
 
-	reaped := exec.Command("/bin/sh", "-c", "exit 0")
-	if err := reaped.Start(); err != nil {
-		t.Fatalf("starting the reaped process: %v", err)
-	}
+	reaped := startFixture(t, "/bin/sh", "-c", "exit 0")
 	reapedPID := reaped.Process.Pid
 	if err := reaped.Wait(); err != nil {
 		t.Fatalf("waiting for the reaped process: %v", err)
@@ -191,25 +186,50 @@ func alive(pid int) bool {
 	return state != "Z"
 }
 
-// procState returns the single-letter state field from /proc/<pid>/stat, and
-// whether it could be read at all.
-func procState(pid int) (string, bool) {
+// statFieldsAfterComm returns the fields of /proc/<pid>/stat that follow the
+// comm field, and whether they could be read at all.
+//
+// Field 2 is the executable name in parentheses and may itself contain spaces
+// and parentheses, so the fields after it begin after the LAST ')', not at the
+// third whitespace-separated token.
+func statFieldsAfterComm(pid int) ([]string, bool) {
 	b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 	if err != nil {
-		return "", false
+		return nil, false
 	}
-	// Field 2 is the executable name in parentheses and may itself contain
-	// spaces and parentheses, so the state field is the first one after the
-	// LAST ')', not the third whitespace-separated token.
 	i := strings.LastIndexByte(string(b), ')')
 	if i < 0 {
-		return "", false
+		return nil, false
 	}
 	fields := strings.Fields(string(b)[i+1:])
 	if len(fields) == 0 {
+		return nil, false
+	}
+	return fields, true
+}
+
+// procState returns the single-letter state field from /proc/<pid>/stat, and
+// whether it could be read at all.
+func procState(pid int) (string, bool) {
+	fields, ok := statFieldsAfterComm(pid)
+	if !ok {
 		return "", false
 	}
 	return fields[0], true
+}
+
+// procPGID returns the process group id from /proc/<pid>/stat, and whether it
+// could be read at all. The fields after comm run state, ppid, pgrp.
+func procPGID(pid int) (int, bool) {
+	fields, ok := statFieldsAfterComm(pid)
+	if !ok || len(fields) < 3 {
+		return 0, false
+	}
+	pgid, err := strconv.Atoi(fields[2])
+	if err != nil {
+		return 0, false
+	}
+	return pgid, true
 }
 
 // TestAlive pins the distinction alive exists to make. The zombie row is the
@@ -219,19 +239,13 @@ func TestAlive(t *testing.T) {
 	// A child that has exited but has not been waited for is a zombie whose
 	// parent is this test binary, which is the same kernel state a SIGKILLed
 	// orphan under a non-reaping PID 1 ends up in.
-	zombie := exec.Command("/bin/sh", "-c", "exit 0")
-	if err := zombie.Start(); err != nil {
-		t.Fatalf("starting the zombie's process: %v", err)
-	}
+	zombie := startFixture(t, "/bin/sh", "-c", "exit 0")
 	zombiePID := zombie.Process.Pid
 	defer func() { _ = zombie.Wait() }()
 	waitForState(t, zombiePID, "Z")
 
 	// A process that ran and was reaped leaves a PID that names nothing.
-	reaped := exec.Command("/bin/sh", "-c", "exit 0")
-	if err := reaped.Start(); err != nil {
-		t.Fatalf("starting the reaped process: %v", err)
-	}
+	reaped := startFixture(t, "/bin/sh", "-c", "exit 0")
 	reapedPID := reaped.Process.Pid
 	if err := reaped.Wait(); err != nil {
 		t.Fatalf("waiting for the reaped process: %v", err)
@@ -289,6 +303,194 @@ func waitForState(t *testing.T, pid int, want string) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("process %d never reached state %q; it is %q", pid, want, state)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// startFixture starts a fixture process in a process group of its own and
+// registers cleanup that kills that whole group and then FAILS the test if
+// anything from it is still running.
+//
+// The group is the point, and it is the same lesson configureKillProcessGroup
+// encodes one file over. `sh -c "sleep 600"` is two processes: dash forks the
+// sleeper and waits for it, so cleanup that kills cmd.Process kills the shell
+// and leaves the sleeper running, reparented to PID 1, for its full ten
+// minutes. The fixtures here did exactly that, and every assertion in them
+// still passed, because they only ever asked about the pid they had started.
+// The leak surfaced as a line in a CI cleanup log instead of as a red test.
+//
+// Killing the group closes that hole, because a forked grandchild inherits the
+// group. Scanning the group afterwards is what keeps it closed: a grandchild
+// whose pid the test never learned is still a member, so the scan sees it.
+// TestLiveGroupMembers pins that it does.
+func startFixture(t *testing.T, name string, args ...string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	// Setpgid with a zero Pgid makes the child the leader of a new group whose
+	// id is its own pid.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting fixture %s: %v", name, err)
+	}
+	pgid := cmd.Process.Pid
+	desc := strings.Join(append([]string{name}, args...), " ")
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		// Reap the leader. Its grandchildren belong to PID 1 by then and are
+		// not ours to wait for, which is why the scan below, not this Wait, is
+		// what decides whether the group actually died.
+		_ = cmd.Wait()
+		survivors, any := waitUntilGroupDead(pgid, 2*time.Second)
+		if !any {
+			return
+		}
+		for _, pid := range survivors {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		t.Errorf("fixture %q left process group %d running after cleanup (survivors: %v); "+
+			"a fixture that outlives its test is an orphan on the CI runner", desc, pgid, survivors)
+	})
+	return cmd
+}
+
+// waitUntilGroupDead polls until no process in group pgid is running, up to d,
+// and returns whatever is still running when the window closes.
+//
+// It polls for the same reason waitUntilDead does. SIGKILL is asynchronous, so
+// a group that is being torn down correctly can still have a member in a
+// running state for a moment after the kill returns; reading once would report
+// a leak against cleanup that worked.
+func waitUntilGroupDead(pgid int, d time.Duration) ([]int, bool) {
+	deadline := time.Now().Add(d)
+	for {
+		live, any := liveGroupMembers(pgid)
+		if !any {
+			return nil, false
+		}
+		if time.Now().After(deadline) {
+			return live, true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// liveGroupMembers reports whether any process in group pgid is still RUNNING,
+// and, where it can enumerate them, which ones.
+//
+// The zombie distinction alive draws applies to a group as much as to a pid: a
+// correctly killed group leaves its orphans as zombies under a non-reaping PID
+// 1, and counting those as survivors would fail cleanup that worked. So where
+// /proc is available this walks it and filters with alive. Where it is not,
+// PID 1 reaps orphans, no zombie outlives the kill, and signal 0 to the group
+// answers the same question exactly - it just cannot name the pids.
+func liveGroupMembers(pgid int) ([]int, bool) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, syscall.Kill(-pgid, 0) == nil
+	}
+	var live []int
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		if got, ok := procPGID(pid); !ok || got != pgid {
+			continue
+		}
+		if !alive(pid) {
+			continue
+		}
+		live = append(live, pid)
+	}
+	return live, len(live) > 0
+}
+
+// TestLiveGroupMembers pins that the teardown assertion startFixture installs
+// can actually fail, per CLAUDE.md rule 4.
+//
+// The orphan row is the one that matters. It reconstructs the exact leak this
+// file shipped with - a shell killed by pid, its forked sleeper reparented to
+// PID 1 and left running - and requires that the scan still names the sleeper,
+// whose pid was never registered anywhere. A check that only looked at the
+// pids it was handed would pass both rows here and still let that sleeper out
+// onto the runner.
+func TestLiveGroupMembers(t *testing.T) {
+	if _, ok := procState(os.Getpid()); !ok {
+		t.Skip("no /proc: liveGroupMembers falls back to a signal-0 probe of the group, which is exact where PID 1 reaps orphans")
+	}
+
+	// A group whose leader is killed by pid, leaving the child it forked
+	// running. startFixture's cleanup kills the group afterwards, which is what
+	// keeps this row from leaking the sleeper it deliberately strands - and
+	// exercises that the cleanup reaps a grandchild, not just a leader.
+	orphaned := startFixture(t, "/bin/sh", "-c", "sleep 600")
+	orphanedPGID := orphaned.Process.Pid
+	strandedPID := waitForGroupMember(t, orphanedPGID, orphanedPGID)
+	if err := orphaned.Process.Kill(); err != nil {
+		t.Fatalf("killing the group leader: %v", err)
+	}
+	_ = orphaned.Wait()
+
+	// A group whose only member exited and was reaped, so nothing of it is
+	// left in the process table at all.
+	gone := startFixture(t, "/bin/sh", "-c", "exit 0")
+	gonePGID := gone.Process.Pid
+	if err := gone.Wait(); err != nil {
+		t.Fatalf("waiting for the reaped leader: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		pgid    int
+		wantPID int // 0 means the group must report nothing running
+		pins    string
+	}{
+		{
+			name:    "a child orphaned by a kill aimed at the group leader",
+			pgid:    orphanedPGID,
+			wantPID: strandedPID,
+			pins:    "a survivor whose pid the test never registered is still found, which is what makes the teardown assertion able to fail",
+		},
+		{
+			name:    "a group whose only member exited and was reaped",
+			pgid:    gonePGID,
+			wantPID: 0,
+			pins:    "cleanup that worked is not reported as a leak",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, any := liveGroupMembers(tc.pgid)
+			if want := tc.wantPID != 0; any != want {
+				t.Fatalf("liveGroupMembers(%d) reported running=%v (%v), want %v; this row pins that %s",
+					tc.pgid, any, got, want, tc.pins)
+			}
+			if tc.wantPID != 0 && !slices.Contains(got, tc.wantPID) {
+				t.Errorf("liveGroupMembers(%d) = %v, want it to include %d; this row pins that %s",
+					tc.pgid, got, tc.wantPID, tc.pins)
+			}
+		})
+	}
+}
+
+// waitForGroupMember polls until a process other than the leader appears in
+// group pgid and returns its pid. It is a state predicate rather than a sleep,
+// because how long a shell takes to fork its child is exactly the kind of
+// timing this repo does not get to assume.
+func waitForGroupMember(t *testing.T, pgid, leader int) int {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		members, _ := liveGroupMembers(pgid)
+		for _, pid := range members {
+			if pid != leader {
+				return pid
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("group %d never gained a member besides its leader %d", pgid, leader)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
