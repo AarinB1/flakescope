@@ -1,0 +1,22 @@
+# The gate that `make check` describes, run where everyone can see it.
+#
+# `push` is restricted to main so a merge is checked once on the branch that
+# matters. `pull_request` covers the proposed change itself. Together they run
+# once when a PR opens and once when it merges, rather than twice on every
+# push to a PR branch.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - run: make check

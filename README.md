@@ -1,5 +1,7 @@
 # flakescope
 
+[![CI](https://github.com/AarinB1/flakescope/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/AarinB1/flakescope/actions/workflows/ci.yml?query=branch%3Amain)
+
 A CLI that reruns a Go package's tests under many configurations and reports
 which tests fail nondeterministically, along with the minimal configuration
 that reproduces each.
