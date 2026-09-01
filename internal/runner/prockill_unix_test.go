@@ -21,9 +21,9 @@ import (
 // The fake is a shell script named `go`, not the go tool, so this does not
 // invoke `go test` (CLAUDE.md rule 2).
 //
-// The assertion is `!alive(pid)`, not `syscall.Kill(pid, 0) != nil`. See alive
+// The assertion is about alive, not `syscall.Kill(pid, 0) != nil`. See alive
 // for why those are different questions and why only the first one is the one
-// this test is asking.
+// this test is asking. It is polled rather than read once; see waitUntilDead.
 func TestTimeoutKillsProcessGroup(t *testing.T) {
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "child.pid")
@@ -78,9 +78,91 @@ func TestTimeoutKillsProcessGroup(t *testing.T) {
 		t.Fatal("Run did not return after the configuration timeout")
 	}
 
-	if alive(pid) {
+	if !waitUntilDead(pid, 2*time.Second) {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 		t.Fatalf("orphaned child process %d still running after the timeout", pid)
+	}
+}
+
+// waitUntilDead polls alive until pid stops running, up to d, and reports
+// whether it got there.
+//
+// The check this replaced read alive once, immediately after Run returned.
+// Run returns when the `go` process has been waited for, and nothing orders
+// the group SIGKILL's effect on the GRANDCHILD against that: the kill is
+// asynchronous, so on a loaded or slow machine the sleeper can still be in a
+// running state for a moment after Run comes back. A single read there fails
+// the test for a runner that killed the group correctly - the same shape of
+// false failure, in the same direction, as the zombie misread this file's
+// alive helper exists to prevent.
+//
+// The window does not weaken the assertion. A runner that only SIGKILLs the
+// `go` PID leaves a `sleep 600` orphan, which is still running when the window
+// closes and still fails the test.
+func waitUntilDead(pid int, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		if !alive(pid) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestWaitUntilDead pins that the settle window added for slow machines did
+// not turn the orphan assertion into one that cannot fail. The live row is the
+// one that matters: a process that is still running when the window closes
+// must still be reported as such, because that report is what fails
+// TestTimeoutKillsProcessGroup for a runner that leaked the process group.
+func TestWaitUntilDead(t *testing.T) {
+	live := exec.Command("/bin/sh", "-c", "sleep 600")
+	if err := live.Start(); err != nil {
+		t.Fatalf("starting the live process: %v", err)
+	}
+	livePID := live.Process.Pid
+	defer func() {
+		_ = live.Process.Kill()
+		_ = live.Wait()
+	}()
+
+	reaped := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := reaped.Start(); err != nil {
+		t.Fatalf("starting the reaped process: %v", err)
+	}
+	reapedPID := reaped.Process.Pid
+	if err := reaped.Wait(); err != nil {
+		t.Fatalf("waiting for the reaped process: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		pid  int
+		want bool
+		pins string
+	}{
+		{
+			name: "a process still running when the window closes",
+			pid:  livePID,
+			want: false,
+			pins: "the window does not swallow a genuinely leaked process",
+		},
+		{
+			name: "a process that is already gone",
+			pid:  reapedPID,
+			want: true,
+			pins: "a dead process is reported dead without burning the window",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := waitUntilDead(tc.pid, 50*time.Millisecond); got != tc.want {
+				t.Errorf("waitUntilDead(%d) = %v, want %v; this row pins that %s", tc.pid, got, tc.want, tc.pins)
+			}
+		})
 	}
 }
 
