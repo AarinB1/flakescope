@@ -1,0 +1,9 @@
+{"Time":"2026-09-07T05:50:51.622208486Z","Action":"start","Package":"github.com/AarinB1/flakescope/testdata/flakypkg"}
+{"Time":"2026-09-07T05:50:51.62424521Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestProbabilisticLoad"}
+{"Time":"2026-09-07T05:50:51.624297557Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestProbabilisticLoad","Output":"=== RUN   TestProbabilisticLoad\n"}
+{"Time":"2026-09-07T05:50:51.624344804Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestProbabilisticLoad","Output":"    probload_test.go:32: lost updates under parallel execution: counter = 665, want 674\n"}
+{"Time":"2026-09-07T05:50:51.624365294Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestProbabilisticLoad","Output":"--- FAIL: TestProbabilisticLoad (0.00s)\n"}
+{"Time":"2026-09-07T05:50:51.624369716Z","Action":"fail","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestProbabilisticLoad","Elapsed":0}
+{"Time":"2026-09-07T05:50:51.624427174Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Output":"FAIL\n"}
+{"Time":"2026-09-07T05:50:51.624696922Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Output":"FAIL\tgithub.com/AarinB1/flakescope/testdata/flakypkg\t0.002s\n"}
+{"Time":"2026-09-07T05:50:51.624726794Z","Action":"fail","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Elapsed":0.003}

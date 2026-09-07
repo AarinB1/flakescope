@@ -703,6 +703,354 @@ func TestResolutionIsAchievable(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// The four cases the previous classifier got wrong
+// ---------------------------------------------------------------------------
+
+// replayer answers a configuration with a recorded stream, parsing each stream
+// once and handing the same parsed run back for every replicate of it.
+//
+// The replicates are the point. A rate needs repeated observations under one
+// configuration, so a fixture that expresses "fails 2% of the time at four
+// processors" answers 4 of 200 four-processor configurations with the recording
+// of a run that failed and the other 196 with the recording of a run that
+// passed - both of them made under that exact configuration (CLAUDE.md rule 5,
+// and see PROVENANCE.md for why two recordings of one configuration is what
+// rule 5 looks like for a nondeterministic fixture).
+type replayer struct {
+	t     *testing.T
+	cache map[string]*gotest.Run
+}
+
+func newReplayer(t *testing.T) *replayer {
+	t.Helper()
+	return &replayer{t: t, cache: make(map[string]*gotest.Run)}
+}
+
+func (r *replayer) parse(stream string) *gotest.Run {
+	r.t.Helper()
+	if run, ok := r.cache[stream]; ok {
+		return run
+	}
+	b, err := os.ReadFile(filepath.Join("..", "..", "testdata", "streams", stream))
+	if err != nil {
+		r.t.Fatalf("reading recorded stream: %v", err)
+	}
+	run, err := gotest.ParseBytes(b)
+	if err != nil {
+		r.t.Fatalf("parsing %s: %v", stream, err)
+	}
+	r.cache[stream] = run
+	return run
+}
+
+// times returns n results for cfg, all replaying stream.
+func (r *replayer) times(cfg runner.Config, stream string, n int) []runner.Result {
+	r.t.Helper()
+	run := r.parse(stream)
+	out := make([]runner.Result, n)
+	for i := range out {
+		out[i] = runner.Result{Config: cfg, Outcome: runner.OutcomeCompleted, Run: run}
+	}
+	return out
+}
+
+func results(groups ...[]runner.Result) []runner.Result {
+	var out []runner.Result
+	for _, g := range groups {
+		out = append(out, g...)
+	}
+	return out
+}
+
+// The configurations the recordings were made under, named so that a mismatch
+// between a configuration and its stream is visible at the call site.
+var (
+	cfgP1          = runner.Config{GOMAXPROCS: 1, Count: 1}
+	cfgP2          = runner.Config{GOMAXPROCS: 2, Count: 1}
+	cfgP4          = runner.Config{GOMAXPROCS: 4, Count: 1}
+	cfgP1Shuffled1 = runner.Config{GOMAXPROCS: 1, ShuffleSeed: 1, Count: 1}
+	cfgP2Shuffled1 = runner.Config{GOMAXPROCS: 2, ShuffleSeed: 1, Count: 1}
+	cfgP4Shuffled1 = runner.Config{GOMAXPROCS: 4, ShuffleSeed: 1, Count: 1}
+)
+
+// orderDependentResults: TestOrderDependent fails whenever seed 1 permutes
+// TestPoisonsGlobalState ahead of it, and passes whenever it does not, at every
+// processor count. Ten replicates per cell, sixty configurations.
+func orderDependentResults(r *replayer) []runner.Result {
+	const perCell = 10
+	return results(
+		r.times(cfgP1Shuffled1, "orderfail.json", perCell),
+		r.times(cfgP2Shuffled1, "orderload2.json", perCell),
+		r.times(cfgP4Shuffled1, "orderload.json", perCell),
+		r.times(cfgP1, "singleproc.json", perCell),
+		r.times(cfgP2, "loadfail2.json", perCell),
+		r.times(cfgP4, "loadfail.json", perCell),
+	)
+}
+
+// loadDependentResults: TestLoadDependent fails at two and four processors and
+// passes at one, whatever the test order. Same sixty configurations.
+func loadDependentResults(r *replayer) []runner.Result { return orderDependentResults(r) }
+
+// probabilisticLoadResults: TestProbabilisticLoad fails at roughly 2% above one
+// processor and never at one processor, spread evenly across shuffled and
+// unshuffled configurations.
+//
+// Eight hundred configurations, because that is what 2% costs. The matrix
+// comment in internal/runner states the same thing from the other direction:
+// at --runs 20 nothing below about a third is visible.
+func probabilisticLoadResults(r *replayer) []runner.Result {
+	const perCell = 200
+	const failsPerLoadedCell = 4 // 4/200 = 2%
+	return results(
+		r.times(cfgP1, "probload-p1.json", perCell),
+		r.times(cfgP1Shuffled1, "probload-p1-shuffled.json", perCell),
+		r.times(cfgP4, "probload-p4-fail.json", failsPerLoadedCell),
+		r.times(cfgP4, "probload-p4-pass.json", perCell-failsPerLoadedCell),
+		r.times(cfgP4Shuffled1, "probload-p4-shuffled-fail.json", failsPerLoadedCell),
+		r.times(cfgP4Shuffled1, "probload-p4-shuffled-pass.json", perCell-failsPerLoadedCell),
+	)
+}
+
+// oneFailureInSixtyResults: the same fixture, at the run count a person
+// actually types. One failure, sixty configurations, and nothing to say.
+func oneFailureInSixtyResults(r *replayer) []runner.Result {
+	const perCell = 15
+	return results(
+		r.times(cfgP1, "probload-p1.json", perCell),
+		r.times(cfgP1Shuffled1, "probload-p1-shuffled.json", perCell),
+		r.times(cfgP4, "probload-p4-fail.json", 1),
+		r.times(cfgP4, "probload-p4-pass.json", perCell-1),
+		r.times(cfgP4Shuffled1, "probload-p4-shuffled-pass.json", perCell),
+	)
+}
+
+// wildShapeResults is the shape the OLD matrix produced, with the failure rate
+// that was actually observed in the wild: sixty configurations of which 56 are
+// shuffled and 4 are not, and one failure.
+//
+// This is the fixture the previous classifier misclassifies. Its order rule
+// asked two questions - were all the failures shuffled, and did anything
+// unshuffled pass - and on this input both are yes, so it returned
+// order-dependent. Both remain yes here. What changed is that they are no
+// longer taken as evidence: one failure in 56 shuffled runs against none in 4
+// unshuffled ones is a difference two coin flips would supply.
+func wildShapeResults(r *replayer) []runner.Result {
+	return results(
+		r.times(cfgP4Shuffled1, "probload-p4-shuffled-fail.json", 1),
+		r.times(cfgP4Shuffled1, "probload-p4-shuffled-pass.json", 55),
+		r.times(cfgP4, "probload-p4-pass.json", 2),
+		r.times(cfgP1, "probload-p1.json", 2),
+	)
+}
+
+// TestClassifiesRecordedStreamsByRate is this version's exit criterion.
+//
+// Every case here is one the previous implementation got wrong, and the first
+// three of them are wrong in the same direction: it labelled them
+// order-dependent, because it asked whether every failure had been shuffled
+// rather than whether shuffling made failure more likely. The fourth is the one
+// it answered with a label where the honest answer is that sixty runs cannot
+// see a failure that happens 2% of the time.
+func TestClassifiesRecordedStreamsByRate(t *testing.T) {
+	tests := []struct {
+		name   string
+		build  func(*replayer) []runner.Result
+		test   string
+		want   Dependence
+		wantEv func(t *testing.T, ev Evidence)
+	}{
+		{
+			name:  "genuinely order-dependent, at every GOMAXPROCS",
+			build: orderDependentResults,
+			test:  "TestOrderDependent",
+			want:  DependenceOrder,
+			wantEv: func(t *testing.T, ev Evidence) {
+				wantRate(t, "shuffled", ev.Shuffled, 30, 30)
+				wantRate(t, "unshuffled", ev.Unshuffled, 0, 30)
+				// The load axis must stay silent: every processor count fails
+				// at the same rate, because what moves is the seed.
+				for _, p := range ev.ByGOMAXPROCS {
+					wantRate(t, p.Rate.Label, p.Rate, 10, 20)
+				}
+				if ev.LoadRises() {
+					t.Error("the load axis claims a rise where every processor count fails at 10/20")
+				}
+			},
+		},
+		{
+			name:  "genuinely load-dependent, deterministic threshold",
+			build: loadDependentResults,
+			test:  "TestLoadDependent",
+			want:  DependenceLoad,
+			wantEv: func(t *testing.T, ev Evidence) {
+				wantRate(t, "GOMAXPROCS=1", ev.LowestProcs(), 0, 20)
+				wantRate(t, "above GOMAXPROCS=1", ev.HigherProcs(), 40, 40)
+				if !ev.ProcsThreshold() {
+					t.Error("a clean threshold - nothing fails at one processor, everything fails above it - was not recognised as one")
+				}
+				// And the order axis must stay silent, even though half the
+				// failures were shuffled.
+				wantRate(t, "shuffled", ev.Shuffled, 20, 30)
+				wantRate(t, "unshuffled", ev.Unshuffled, 20, 30)
+				if ev.OrderRises() {
+					t.Error("the order axis claims a rise between two arms that fail at 20/30 apiece")
+				}
+			},
+		},
+		{
+			name:  "genuinely load-dependent, probabilistic at 2%",
+			build: probabilisticLoadResults,
+			test:  "TestProbabilisticLoad",
+			want:  DependenceLoad,
+			wantEv: func(t *testing.T, ev Evidence) {
+				wantRate(t, "GOMAXPROCS=1", ev.LowestProcs(), 0, 400)
+				wantRate(t, "above GOMAXPROCS=1", ev.HigherProcs(), 8, 400)
+				// THERE IS NO THRESHOLD HERE. Four processors both passes and
+				// fails, so the rule that survives from the old classifier
+				// cannot see this case at all; the rate comparison is what
+				// finds it.
+				if ev.ProcsThreshold() {
+					t.Error("a rate of 8/400 above the threshold was read as a clean threshold")
+				}
+				wantRate(t, "shuffled", ev.Shuffled, 4, 400)
+				wantRate(t, "unshuffled", ev.Unshuffled, 4, 400)
+				if ev.OrderRises() {
+					t.Error("the order axis claims a rise in a fixture whose runs contain one test, where no test order exists")
+				}
+			},
+		},
+		{
+			// The one the tool got wrong in the wild, reproduced exactly: a
+			// lopsided matrix, one failure, and the failure happened to land in
+			// the arm that holds 93% of the runs.
+			name:  "the old matrix's shape: one failure among 56 shuffled runs",
+			build: wildShapeResults,
+			test:  "TestProbabilisticLoad",
+			want:  DependenceUndetermined,
+			wantEv: func(t *testing.T, ev Evidence) {
+				wantRate(t, "shuffled", ev.Shuffled, 1, 56)
+				wantRate(t, "unshuffled", ev.Unshuffled, 0, 4)
+				// The old rule's premise, asserted rather than described: it
+				// holds here, and it is still not evidence. If this assertion
+				// ever fails, the fixture has stopped being the case that
+				// produced the wrong label.
+				if ev.Shuffled.Fail != ev.Shuffled.Fail+ev.Unshuffled.Fail {
+					t.Error("some failure was unshuffled; this is no longer the fixture the old rule claimed")
+				}
+				if ev.Unshuffled.Obs == ev.Unshuffled.Fail {
+					t.Error("no unshuffled run passed; this is no longer the fixture the old rule claimed")
+				}
+			},
+		},
+		{
+			name:  "one failure in sixty supports no claim at all",
+			build: oneFailureInSixtyResults,
+			test:  "TestProbabilisticLoad",
+			want:  DependenceUndetermined,
+			wantEv: func(t *testing.T, ev Evidence) {
+				wantRate(t, "GOMAXPROCS=1", ev.LowestProcs(), 0, 30)
+				wantRate(t, "above GOMAXPROCS=1", ev.HigherProcs(), 1, 30)
+				res, ok := ev.Resolution()
+				if !ok {
+					t.Fatal("sixty configurations resolved nothing at all, not even a bound")
+				}
+				// The bound has to be honest about the case above: this run
+				// could not have seen 2%, which is why it declines rather than
+				// concluding the test is order-independent or load-independent.
+				if res <= 0.02 {
+					t.Errorf("sixty configurations claim to resolve %.1f%%, which would have caught the 2%% fixture", res*100)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := Build(fixturePkg, cfgP4, tc.build(newReplayer(t)))
+			got := testByName(t, rep, tc.test)
+			if got.Class != ClassFlaky {
+				t.Fatalf("%s is %v, want flaky (%d passed, %d failed)", tc.test, got.Class, got.Pass, got.Fail)
+			}
+			if got.Dependence != tc.want {
+				t.Errorf("%s = %v, want %v\n  shuffled   %v\n  unshuffled %v\n  by procs   %v",
+					tc.test, got.Dependence, tc.want, got.Evidence.Shuffled, got.Evidence.Unshuffled, got.Evidence.ByGOMAXPROCS)
+			}
+			tc.wantEv(t, got.Evidence)
+		})
+	}
+}
+
+func wantRate(t *testing.T, name string, got Rate, fail, obs int) {
+	t.Helper()
+	if got.Fail != fail || got.Obs != obs {
+		t.Errorf("%s = %d/%d, want %d/%d", name, got.Fail, got.Obs, fail, obs)
+	}
+}
+
+// TestProbabilisticLoadIsInvisibleToAThreshold states the difference between
+// the two load fixtures in one assertion, because it is the difference the
+// whole rewrite turns on.
+//
+// The deterministic fixture has a clean threshold and the old rule could have
+// caught it, had the order rule not been checked first. The probabilistic one
+// has no threshold at all: four processors passes 196 times and fails 4 times,
+// so "every failure had strictly more processors than every pass" is false, and
+// no amount of reordering the old rules would have found it.
+func TestProbabilisticLoadIsInvisibleToAThreshold(t *testing.T) {
+	r := newReplayer(t)
+
+	deterministic := testByName(t, Build(fixturePkg, cfgP4, loadDependentResults(r)), "TestLoadDependent")
+	if !deterministic.Evidence.ProcsThreshold() {
+		t.Error("the deterministic fixture has a clean GOMAXPROCS threshold and the threshold rule missed it")
+	}
+
+	probabilistic := testByName(t, Build(fixturePkg, cfgP4, probabilisticLoadResults(r)), "TestProbabilisticLoad")
+	if probabilistic.Evidence.ProcsThreshold() {
+		t.Fatal("the probabilistic fixture has no threshold; reporting one means the rule is not reading the passes")
+	}
+	if probabilistic.Dependence != DependenceLoad {
+		t.Errorf("the probabilistic fixture = %v, want %v; it is only reachable through the rate comparison",
+			probabilistic.Dependence, DependenceLoad)
+	}
+}
+
+// TestSixtyRunsCannotSeeTwoPercent is the pair of fixtures read the other way
+// round: the same test, the same failure mechanism, and the only difference is
+// how many configurations were run.
+//
+// This is the assertion behind the sensitivity line the report prints. A tool
+// that said "undetermined" at sixty runs and "load-dependent" at eight hundred
+// without ever saying why would look like it was guessing in both.
+func TestSixtyRunsCannotSeeTwoPercent(t *testing.T) {
+	r := newReplayer(t)
+
+	short := testByName(t, Build(fixturePkg, cfgP4, oneFailureInSixtyResults(r)), "TestProbabilisticLoad")
+	long := testByName(t, Build(fixturePkg, cfgP4, probabilisticLoadResults(r)), "TestProbabilisticLoad")
+
+	if short.Dependence != DependenceUndetermined {
+		t.Errorf("sixty configurations produced %v; one failure is not evidence of anything", short.Dependence)
+	}
+	if long.Dependence != DependenceLoad {
+		t.Errorf("eight hundred configurations produced %v, want %v", long.Dependence, DependenceLoad)
+	}
+
+	shortRes, ok := short.Evidence.Resolution()
+	if !ok {
+		t.Fatal("the short run reported no resolution")
+	}
+	longRes, ok := long.Evidence.Resolution()
+	if !ok {
+		t.Fatal("the long run reported no resolution")
+	}
+	if !(longRes < 0.02 && shortRes > 0.02) {
+		t.Errorf("resolutions are %.1f%% at sixty runs and %.1f%% at eight hundred; "+
+			"the 2%% fixture must sit between them or the printed bound is not the truth about the run",
+			shortRes*100, longRes*100)
+	}
+}
+
 func TestExitCode(t *testing.T) {
 	tests := []struct {
 		name string

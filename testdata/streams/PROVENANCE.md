@@ -23,6 +23,12 @@ command was run from the repository root with `P=./testdata/flakypkg/`.
 | `buildfail.json` | `GOMAXPROCS=1 go test -count=1 -json $P` | A compile error. Every event is package-scoped; the build events carry `ImportPath` and no `Package` at all. |
 | `truncated.json` | `head -c 1300 loadfail.json` | What a killed process leaves behind: the last JSON object is cut in half and two tests are still in flight. |
 | `panic.json` | `GOMAXPROCS=1 go test -count=1 -json -run 'TestAlwaysPasses\|TestPanics\|TestLoadDependent' $P` | Superseded by `panic1.json` for signature work, retained because `internal/gotest`'s parser tests are written against this exact stream: a test binary dying mid-run, so the package-level `fail` carries no `Test` field. |
+| `probload-p1.json` | `GOMAXPROCS=1 go test -count=1 -json -run 'TestProbabilisticLoad$' $P` | The probabilistic load fixture at one processor, where it cannot fail. |
+| `probload-p4-pass.json` | `GOMAXPROCS=4 go test -count=1 -json -run 'TestProbabilisticLoad$' $P` | The same fixture at four processors, on a run that passed. |
+| `probload-p4-fail.json` | `GOMAXPROCS=4 go test -count=1 -json -run 'TestProbabilisticLoad$' $P` | The same configuration again, on a run that failed. |
+| `probload-p1-shuffled.json` | `GOMAXPROCS=1 go test -count=1 -json -shuffle=1 -run 'TestProbabilisticLoad$' $P` | One processor, shuffle on. |
+| `probload-p4-shuffled-pass.json` | `GOMAXPROCS=4 go test -count=1 -json -shuffle=1 -run 'TestProbabilisticLoad$' $P` | Four processors and shuffle on, on a run that passed. |
+| `probload-p4-shuffled-fail.json` | `GOMAXPROCS=4 go test -count=1 -json -shuffle=1 -run 'TestProbabilisticLoad$' $P` | The same configuration again, on a run that failed. |
 
 ## The build tag
 
@@ -68,3 +74,85 @@ committed fixture carries `flaky_test.go:NN` or `crash_test.go:NN`, so editing
 those files - even editing a comment - invalidates every recording taken from
 them at once. Re-record the whole set together, and regenerate `truncated.json`
 from the new `loadfail.json` afterwards.
+
+## The probabilistic recordings, and what rule 5 means for them
+
+`probload-p4-pass.json` and `probload-p4-fail.json` were recorded under the
+SAME configuration. That is not a violation of rule 5; it is what rule 5 looks
+like when the fixture is genuinely nondeterministic. A test that fails a fifth
+of the time at four processors produces both streams under that one
+configuration, and a fixture set that held only one of them could not express a
+rate at all.
+
+What the report tests do with them is stipulate the rate: a case that means
+"this test fails at about 2% above the threshold" answers 2 in 100 of its
+four-processor configurations with the failing stream and the other 98 with the
+passing one. Every configuration is still answered by a recording made under
+exactly that configuration. The mixture is the fixture's stated failure rate,
+and it is stated in the test rather than inferred from how often a recording
+session happened to trip.
+
+Measured at the time of recording, 100 runs per configuration:
+
+| Configuration | Failures |
+| --- | --- |
+| `GOMAXPROCS=1` | 0/100 |
+| `GOMAXPROCS=1 -shuffle=1` | 0/100 |
+| `GOMAXPROCS=4` | 21/100 |
+| `GOMAXPROCS=4 -shuffle=1` | 28/100 |
+
+The `-run` filter leaves exactly one test in the stream, which is the point on
+the order axis: a run of one test HAS no test order, so any classifier that
+calls this fixture order-dependent is wrong by construction rather than by
+degree.
+
+The six streams were recorded with this file present as `probload_test.go` and
+deleted afterwards, the same way `buildfail.json` was. It is not committed
+because `testdata/flakypkg` is otherwise deterministic by design (see the
+comment at the top of `flaky_test.go`): a genuine data race in the untagged
+package would make every other recording in this directory probabilistic too.
+
+```go
+package flakypkg
+
+import (
+	"sync"
+	"testing"
+	"time"
+)
+
+var probCounter int
+
+func TestProbabilisticLoad(t *testing.T) {
+	const window = 20 * time.Microsecond
+	probCounter = 0
+	var local [2]int
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(slot int) {
+			defer wg.Done()
+			<-start
+			deadline := time.Now().Add(window)
+			for time.Now().Before(deadline) {
+				probCounter++
+				local[slot]++
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	if want := local[0] + local[1]; probCounter != want {
+		t.Fatalf("lost updates under parallel execution: counter = %d, want %d", probCounter, want)
+	}
+}
+```
+
+The 20 microsecond window is what makes the rate intermediate rather than 0% or
+100%. Below about 10 microseconds the second goroutine finishes before another
+P wakes and the race never happens; above about 100 microseconds the two
+goroutines overlap on every run and it always does. At one processor the loop
+completes long before the 10 millisecond mark where sysmon would preempt it, so
+the two goroutines never interleave and the test cannot fail - which is what
+makes the fixture load-dependent rather than merely flaky.
