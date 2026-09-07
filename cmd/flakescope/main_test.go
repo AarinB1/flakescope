@@ -161,8 +161,13 @@ func TestRunExitCodes(t *testing.T) {
 		wantContain []string
 	}{
 		{
+			// TWENTY, NOT EIGHT. Eight configurations put two runs in the
+			// shuffled arm, and two runs do not make a rate: the classifier
+			// declines rather than labelling, which is the whole point of the
+			// rewrite. The default --runs is 20 and that is what a dependence
+			// claim needs at a minimum.
 			name: "flaky tests found",
-			args: []string{"--runs", "8", fixturePkg},
+			args: []string{"--runs", "20", fixturePkg},
 			pick: fixtureStream,
 			want: report.ExitFlaky,
 			wantContain: []string{"FLAKY (2)", "TestOrderDependent", "order-dependent",
@@ -229,7 +234,9 @@ func TestRunExitCodes(t *testing.T) {
 
 func TestRunJSONOutput(t *testing.T) {
 	var stdout, stderr strings.Builder
-	code := run([]string{"--runs", "8", "--json", fixturePkg}, &stdout, &stderr, fixtureBase, replay(t, fixtureStream))
+	// Twenty configurations, for the reason given in TestRunExitCodes: a
+	// dependence label is a rate comparison and eight runs cannot carry one.
+	code := run([]string{"--runs", "20", "--json", fixturePkg}, &stdout, &stderr, fixtureBase, replay(t, fixtureStream))
 
 	var doc struct {
 		Package  string `json:"package"`
