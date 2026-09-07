@@ -1449,6 +1449,272 @@ func TestWriteText(t *testing.T) {
 	}
 }
 
+// TestTextReportShowsTheEvidence: the label and the numbers behind it are
+// printed together. The bug this release fixes survived because nothing in the
+// output disagreed with the classifier - a reader had no way to notice that
+// "order-dependent" rested on one shuffled failure.
+func TestTextReportShowsTheEvidence(t *testing.T) {
+	rep := Build(fixturePkg, cfgP4, orderDependentResults(newReplayer(t)))
+	var b strings.Builder
+	if err := rep.WriteText(&b, false); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	got := b.String()
+
+	for _, want := range []string{
+		"order-dependent",
+		"shuffle:    30/30 (100%) shuffled, 0/30 (0%) unshuffled",
+		"GOMAXPROCS: 1: 10/20 (50%), 2: 10/20 (50%), 4: 10/20 (50%)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q:\n%s", want, got)
+		}
+	}
+	// Nothing raced in this fixture, and an arm with no observations is not a
+	// measurement of zero.
+	if strings.Contains(got, "race:") {
+		t.Errorf("the report printed a race line for a run with no raced configurations:\n%s", got)
+	}
+}
+
+// TestWriteEvidence is the renderer on its own, including the arms that are
+// absent. Each row differs from the one above it in one axis.
+func TestWriteEvidence(t *testing.T) {
+	tests := []struct {
+		name        string
+		ev          Evidence
+		wantContain []string
+		wantAbsent  []string
+	}{
+		{
+			name: "all three axes observed",
+			ev: Evidence{
+				Shuffled:     Rate{Fail: 3, Obs: 28},
+				Unshuffled:   Rate{Fail: 0, Obs: 28},
+				ByGOMAXPROCS: []ProcsRate{{GOMAXPROCS: 1, Rate: Rate{Fail: 0, Obs: 20}}, {GOMAXPROCS: 4, Rate: Rate{Fail: 3, Obs: 36}}},
+				Raced:        Rate{Fail: 1, Obs: 8},
+				Unraced:      Rate{Fail: 2, Obs: 48},
+			},
+			wantContain: []string{
+				"shuffle:    3/28 (11%) shuffled, 0/28 (0%) unshuffled",
+				"GOMAXPROCS: 1: 0/20 (0%), 4: 3/36 (8%)",
+				"race:       1/8 (12%) with -race, 2/48 (4%) without",
+			},
+		},
+		{
+			name: "nothing raced",
+			ev: Evidence{
+				Shuffled:     Rate{Fail: 3, Obs: 28},
+				Unshuffled:   Rate{Fail: 0, Obs: 28},
+				ByGOMAXPROCS: []ProcsRate{{GOMAXPROCS: 1, Rate: Rate{Fail: 3, Obs: 56}}},
+				Unraced:      Rate{Fail: 3, Obs: 56},
+			},
+			wantContain: []string{"shuffle:", "GOMAXPROCS: 1: 3/56 (5%)"},
+			wantAbsent:  []string{"race:"},
+		},
+		{
+			name:       "no observations at all",
+			ev:         Evidence{},
+			wantAbsent: []string{"shuffle:", "GOMAXPROCS:", "race:"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var b strings.Builder
+			writeEvidence(&b, tc.ev)
+			got := b.String()
+			for _, want := range tc.wantContain {
+				if !strings.Contains(got, want) {
+					t.Errorf("output missing %q:\n%s", want, got)
+				}
+			}
+			for _, absent := range tc.wantAbsent {
+				if strings.Contains(got, absent) {
+					t.Errorf("output unexpectedly contains %q:\n%s", absent, got)
+				}
+			}
+		})
+	}
+}
+
+// TestJSONEvidence pins the new schema. It lands now because the schema freezes
+// at v1.0.0 and additions are only free before then (CLAUDE.md rule 3).
+func TestJSONEvidence(t *testing.T) {
+	rep := Build(fixturePkg, cfgP4, orderDependentResults(newReplayer(t)))
+	b, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var doc struct {
+		Tests []struct {
+			Name           string           `json:"name"`
+			Classification string           `json:"classification"`
+			Dependence     string           `json:"dependence"`
+			Evidence       *json.RawMessage `json:"evidence"`
+		} `json:"tests"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	var flaky, clean int
+	for _, e := range doc.Tests {
+		if e.Classification == "flaky" {
+			flaky++
+			if e.Evidence == nil {
+				t.Errorf("%s is flaky and carries no evidence", e.Name)
+			}
+			continue
+		}
+		clean++
+		// Evidence appears exactly where dependence does. A test that never
+		// failed has no rates to show, and emitting zeros for it would invite a
+		// consumer to plot them.
+		if e.Evidence != nil {
+			t.Errorf("%s is %s and carries evidence", e.Name, e.Classification)
+		}
+	}
+	if flaky == 0 || clean == 0 {
+		t.Fatalf("the fixture report has %d flaky and %d non-flaky tests; both are needed here", flaky, clean)
+	}
+
+	var full struct {
+		Tests []struct {
+			Name     string `json:"name"`
+			Evidence *struct {
+				Shuffled     wireRateDoc `json:"shuffled"`
+				Unshuffled   wireRateDoc `json:"unshuffled"`
+				ByGOMAXPROCS []struct {
+					GOMAXPROCS int     `json:"gomaxprocs"`
+					Fail       int     `json:"fail"`
+					Obs        int     `json:"observations"`
+					Rate       float64 `json:"rate"`
+				} `json:"by_gomaxprocs"`
+				Raced                  wireRateDoc `json:"raced"`
+				Unraced                wireRateDoc `json:"unraced"`
+				SmallestResolvableRate *float64    `json:"smallest_resolvable_rate"`
+			} `json:"evidence"`
+		} `json:"tests"`
+	}
+	if err := json.Unmarshal(b, &full); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, e := range full.Tests {
+		if e.Name != "TestOrderDependent" {
+			continue
+		}
+		ev := e.Evidence
+		if ev == nil {
+			t.Fatal("TestOrderDependent carries no evidence")
+		}
+		if ev.Shuffled.Fail != 30 || ev.Shuffled.Obs != 30 || ev.Shuffled.Rate != 1 {
+			t.Errorf("shuffled = %+v, want 30/30 at rate 1", ev.Shuffled)
+		}
+		if ev.Unshuffled.Fail != 0 || ev.Unshuffled.Obs != 30 || ev.Unshuffled.Rate != 0 {
+			t.Errorf("unshuffled = %+v, want 0/30 at rate 0", ev.Unshuffled)
+		}
+		if len(ev.ByGOMAXPROCS) != 3 {
+			t.Fatalf("by_gomaxprocs = %+v, want three entries", ev.ByGOMAXPROCS)
+		}
+		for i, want := range []int{1, 2, 4} {
+			if ev.ByGOMAXPROCS[i].GOMAXPROCS != want {
+				t.Errorf("by_gomaxprocs[%d] is %d, want %d ascending", i, ev.ByGOMAXPROCS[i].GOMAXPROCS, want)
+			}
+			if ev.ByGOMAXPROCS[i].Fail != 10 || ev.ByGOMAXPROCS[i].Obs != 20 {
+				t.Errorf("by_gomaxprocs[%d] = %d/%d, want 10/20", i, ev.ByGOMAXPROCS[i].Fail, ev.ByGOMAXPROCS[i].Obs)
+			}
+		}
+		if ev.Raced.Obs != 0 || ev.Unraced.Obs != 60 {
+			t.Errorf("race arms = %+v and %+v, want nothing raced and 60 unraced", ev.Raced, ev.Unraced)
+		}
+		if ev.SmallestResolvableRate == nil {
+			t.Error("smallest_resolvable_rate is null for a run of sixty configurations")
+		}
+		return
+	}
+	t.Fatal("TestOrderDependent missing from the JSON report")
+}
+
+type wireRateDoc struct {
+	Fail int     `json:"fail"`
+	Obs  int     `json:"observations"`
+	Rate float64 `json:"rate"`
+}
+
+// TestJSONEvidenceIsAdditive: every field a v0.2.0 consumer read is still
+// present and still means the same thing. The schema is a compatibility surface
+// from v1.0.0 and the habit starts before then, not after.
+func TestJSONEvidenceIsAdditive(t *testing.T) {
+	b, err := json.Marshal(fixtureReport(t))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, key := range []string{
+		"package", "configurations", "completed", "timed_out", "errored",
+		"build_failed", "exit_code", "base", "tests",
+	} {
+		if _, ok := doc[key]; !ok {
+			t.Errorf("report lost pre-v0.3.0 field %q", key)
+		}
+	}
+	for _, raw := range doc["tests"].([]any) {
+		entry := raw.(map[string]any)
+		for _, key := range []string{
+			"package", "name", "pass", "fail", "skip", "incomplete",
+			"failure_rate", "classification", "clusters",
+		} {
+			if _, ok := entry[key]; !ok {
+				t.Errorf("test entry %v lost pre-v0.3.0 field %q", entry["name"], key)
+			}
+		}
+	}
+}
+
+// TestJSONResolutionIsNullWhenNothingCouldBeResolved is the case the pointer
+// exists for. A consumer must be able to tell "this run could resolve 14%" from
+// "this run could resolve nothing", and a zero would say the opposite of what
+// it means.
+func TestJSONResolutionIsNullWhenNothingCouldBeResolved(t *testing.T) {
+	b, err := json.Marshal(fixtureReport(t)) // three configurations
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var doc struct {
+		Tests []struct {
+			Name     string `json:"name"`
+			Evidence *struct {
+				SmallestResolvableRate *float64 `json:"smallest_resolvable_rate"`
+			} `json:"evidence"`
+		} `json:"tests"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var seen bool
+	for _, e := range doc.Tests {
+		if e.Evidence == nil {
+			continue
+		}
+		seen = true
+		if e.Evidence.SmallestResolvableRate != nil {
+			t.Errorf("%s claims to resolve %.3f on three configurations",
+				e.Name, *e.Evidence.SmallestResolvableRate)
+		}
+	}
+	if !seen {
+		t.Fatal("no flaky test in the three-configuration report")
+	}
+	// And the field is present rather than omitted, so null is a value a
+	// consumer reads rather than an absence it has to infer.
+	if !strings.Contains(string(b), `"smallest_resolvable_rate":null`) {
+		t.Error("smallest_resolvable_rate was omitted rather than emitted as null")
+	}
+}
+
 // TestReportOrderIsStable: two builds of the same results print identically, or
 // the tool cannot be diffed between runs.
 func TestReportOrderIsStable(t *testing.T) {

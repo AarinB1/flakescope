@@ -291,6 +291,110 @@ func TestRunJSONOutput(t *testing.T) {
 	}
 }
 
+// TestRunShowsTheEvidence is the label's basis reaching a user, through the
+// whole CLI: flags, matrix, executor, classifier, rendering.
+//
+// The numbers are the ones a --runs 20 matrix over the recorded fixture
+// actually produces. Asserting them rather than asserting that some digits
+// appeared is what makes this a test of the evidence rather than of fmt.
+func TestRunShowsTheEvidence(t *testing.T) {
+	var stdout, stderr strings.Builder
+	code := run([]string{"--runs", "20", fixturePkg}, &stdout, &stderr, fixtureBase, replay(t, fixtureStream))
+	if code != report.ExitFlaky {
+		t.Fatalf("run = %d, want %d\nstderr:\n%s", code, report.ExitFlaky, stderr.String())
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		"order-dependent",
+		"shuffle:    5/8 (62%) shuffled, 0/12 (0%) unshuffled",
+		"load-dependent",
+		"GOMAXPROCS: 1: 0/6 (0%), 2: 5/5 (100%), 4: 9/9 (100%)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("stdout missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestRunJSONEvidence: the same numbers on the machine-readable side. The
+// schema freezes at v1.0.0, so this shape lands now.
+func TestRunJSONEvidence(t *testing.T) {
+	var stdout, stderr strings.Builder
+	code := run([]string{"--runs", "20", "--json", fixturePkg}, &stdout, &stderr, fixtureBase, replay(t, fixtureStream))
+	if code != report.ExitFlaky {
+		t.Fatalf("run = %d, want %d\nstderr:\n%s", code, report.ExitFlaky, stderr.String())
+	}
+
+	var doc struct {
+		Tests []struct {
+			Name       string `json:"name"`
+			Dependence string `json:"dependence"`
+			Evidence   *struct {
+				Shuffled struct {
+					Fail int     `json:"fail"`
+					Obs  int     `json:"observations"`
+					Rate float64 `json:"rate"`
+				} `json:"shuffled"`
+				Unshuffled struct {
+					Fail int `json:"fail"`
+					Obs  int `json:"observations"`
+				} `json:"unshuffled"`
+				ByGOMAXPROCS []struct {
+					GOMAXPROCS int `json:"gomaxprocs"`
+					Fail       int `json:"fail"`
+					Obs        int `json:"observations"`
+				} `json:"by_gomaxprocs"`
+				SmallestResolvableRate *float64 `json:"smallest_resolvable_rate"`
+			} `json:"evidence"`
+		} `json:"tests"`
+	}
+	if err := json.Unmarshal([]byte(stdout.String()), &doc); err != nil {
+		t.Fatalf("--json did not emit valid JSON: %v\n%s", err, stdout.String())
+	}
+
+	var seen int
+	for _, e := range doc.Tests {
+		switch e.Name {
+		case "TestOrderDependent":
+			seen++
+			if e.Evidence == nil {
+				t.Fatal("TestOrderDependent carries no evidence")
+			}
+			if e.Evidence.Shuffled.Fail != 5 || e.Evidence.Shuffled.Obs != 8 {
+				t.Errorf("shuffled = %d/%d, want 5/8", e.Evidence.Shuffled.Fail, e.Evidence.Shuffled.Obs)
+			}
+			if e.Evidence.Unshuffled.Fail != 0 || e.Evidence.Unshuffled.Obs != 12 {
+				t.Errorf("unshuffled = %d/%d, want 0/12", e.Evidence.Unshuffled.Fail, e.Evidence.Unshuffled.Obs)
+			}
+			if e.Evidence.SmallestResolvableRate == nil {
+				t.Error("smallest_resolvable_rate is null for a twenty-configuration run")
+			}
+		case "TestLoadDependent":
+			seen++
+			if e.Evidence == nil {
+				t.Fatal("TestLoadDependent carries no evidence")
+			}
+			want := map[int][2]int{1: {0, 6}, 2: {5, 5}, 4: {9, 9}}
+			if len(e.Evidence.ByGOMAXPROCS) != len(want) {
+				t.Fatalf("by_gomaxprocs = %+v, want %d entries", e.Evidence.ByGOMAXPROCS, len(want))
+			}
+			last := 0
+			for _, p := range e.Evidence.ByGOMAXPROCS {
+				if p.GOMAXPROCS <= last {
+					t.Errorf("by_gomaxprocs is not ascending: %+v", e.Evidence.ByGOMAXPROCS)
+				}
+				last = p.GOMAXPROCS
+				if w, ok := want[p.GOMAXPROCS]; !ok || p.Fail != w[0] || p.Obs != w[1] {
+					t.Errorf("GOMAXPROCS=%d = %d/%d, want %v", p.GOMAXPROCS, p.Fail, p.Obs, w)
+				}
+			}
+		}
+	}
+	if seen != 2 {
+		t.Errorf("found %d of the two flaky tests in the JSON report", seen)
+	}
+}
+
 // TestRunCancelsOnInterrupt is the fixture that breaks a CLI which still
 // runs against context.Background() after Setpgid isolated the children.
 // Without NotifyContext, SIGINT never reaches the executor; the test
@@ -358,6 +462,17 @@ func TestUsageDocumentsExitCodes(t *testing.T) {
 		"--runs", "--json", "--timeout", "--verbose",
 	}
 	for _, want := range tests {
+		if !strings.Contains(usage, want) {
+			t.Errorf("usage text does not mention %q", want)
+		}
+	}
+	// The four dependence labels, and the sentence that says a label is a rate
+	// comparison. A user who reads "order-dependent" without knowing what it
+	// was measured against is in the position this release exists to fix.
+	for _, want := range []string{
+		"order-dependent", "load-dependent", "order-and-load-dependent", "undetermined",
+		"COMPARING FAILURE RATES",
+	} {
 		if !strings.Contains(usage, want) {
 			t.Errorf("usage text does not mention %q", want)
 		}

@@ -808,6 +808,69 @@ type wireTest struct {
 	// consumer that has to distinguish "no clusters" from "field absent" is a
 	// consumer this schema has failed.
 	Clusters []wireCluster `json:"clusters"`
+	// Evidence is new in v0.3.0 and is the rate table the dependence label was
+	// read off. It is present exactly where "dependence" is - on flaky tests -
+	// because there is no evidence to show for a test that never failed.
+	//
+	// A consumer that only reads "dependence" reads this report as it read the
+	// last one. A consumer that wants to check the label can now do so.
+	Evidence *wireEvidence `json:"evidence,omitempty"`
+}
+
+// wireRate is one arm of one axis.
+type wireRate struct {
+	Fail int `json:"fail"`
+	Obs  int `json:"observations"`
+	// Rate is redundant with fail and observations, and is emitted anyway so
+	// that a consumer plotting rates does not have to decide what 0/0 means.
+	Rate float64 `json:"rate"`
+}
+
+type wireProcsRate struct {
+	GOMAXPROCS int     `json:"gomaxprocs"`
+	Fail       int     `json:"fail"`
+	Obs        int     `json:"observations"`
+	Rate       float64 `json:"rate"`
+}
+
+type wireEvidence struct {
+	Shuffled     wireRate        `json:"shuffled"`
+	Unshuffled   wireRate        `json:"unshuffled"`
+	ByGOMAXPROCS []wireProcsRate `json:"by_gomaxprocs"`
+	Raced        wireRate        `json:"raced"`
+	Unraced      wireRate        `json:"unraced"`
+	// SmallestResolvableRate is the lowest failure rate this run could have
+	// reported on any axis, and is null when no axis had the observations to
+	// resolve anything. It is not omitted when null: a consumer that has to
+	// tell "could not resolve" from "field absent" is a consumer this schema
+	// has failed.
+	SmallestResolvableRate *float64 `json:"smallest_resolvable_rate"`
+}
+
+func toWireRate(r Rate) wireRate {
+	return wireRate{Fail: r.Fail, Obs: r.Obs, Rate: r.Value()}
+}
+
+func toWireEvidence(ev Evidence) *wireEvidence {
+	w := &wireEvidence{
+		Shuffled:     toWireRate(ev.Shuffled),
+		Unshuffled:   toWireRate(ev.Unshuffled),
+		ByGOMAXPROCS: make([]wireProcsRate, 0, len(ev.ByGOMAXPROCS)),
+		Raced:        toWireRate(ev.Raced),
+		Unraced:      toWireRate(ev.Unraced),
+	}
+	for _, p := range ev.ByGOMAXPROCS {
+		w.ByGOMAXPROCS = append(w.ByGOMAXPROCS, wireProcsRate{
+			GOMAXPROCS: p.GOMAXPROCS,
+			Fail:       p.Rate.Fail,
+			Obs:        p.Rate.Obs,
+			Rate:       p.Rate.Value(),
+		})
+	}
+	if res, ok := ev.Resolution(); ok {
+		w.SmallestResolvableRate = &res
+	}
+	return w
 }
 
 // wireCluster is one group of failures sharing a normalized signature.
@@ -867,6 +930,9 @@ func (r Report) MarshalJSON() ([]byte, error) {
 			c := toWireConfig(*t.Minimal)
 			wt.Minimal = &c
 		}
+		if t.Class == ClassFlaky {
+			wt.Evidence = toWireEvidence(t.Evidence)
+		}
 		wt.Clusters = make([]wireCluster, 0, len(t.Clusters))
 		for _, c := range t.Clusters {
 			wt.Clusters = append(wt.Clusters, wireCluster{
@@ -923,6 +989,11 @@ func (r Report) WriteText(w io.Writer, verbose bool) error {
 				fmt.Fprintf(&b, ", %s", d)
 			}
 			b.WriteString("\n")
+			// THE EVIDENCE, NEXT TO THE LABEL. A reader who can see 3/28
+			// against 0/28 can judge the claim; a bare label asks them to
+			// trust a classifier that was wrong until today, and the way that
+			// bug survived was that nothing in the output disagreed with it.
+			writeEvidence(&b, t.Evidence)
 			// An undetermined verdict is only useful if it says how blind the
 			// run was. "We could not tell" and "we could not have told below
 			// one in three" are different sentences, and the second one names
@@ -1021,6 +1092,27 @@ func writeClusters(b *strings.Builder, t Test, fallbackPkg string, verbose bool)
 				fmt.Fprintf(b, "        also: %s\n", cfg)
 			}
 		}
+	}
+}
+
+// writeEvidence prints one line per axis: the two arms of the shuffle axis, the
+// rate at each GOMAXPROCS value, and the race detector's two arms.
+//
+// The race line is omitted when nothing raced, rather than printed as 0/0.
+// An arm with no observations is not a measurement of zero.
+func writeEvidence(b *strings.Builder, ev Evidence) {
+	if ev.Shuffled.Obs > 0 || ev.Unshuffled.Obs > 0 {
+		fmt.Fprintf(b, "      shuffle:    %v shuffled, %v unshuffled\n", ev.Shuffled, ev.Unshuffled)
+	}
+	if len(ev.ByGOMAXPROCS) > 0 {
+		parts := make([]string, 0, len(ev.ByGOMAXPROCS))
+		for _, p := range ev.ByGOMAXPROCS {
+			parts = append(parts, fmt.Sprintf("%d: %v", p.GOMAXPROCS, p.Rate))
+		}
+		fmt.Fprintf(b, "      GOMAXPROCS: %s\n", strings.Join(parts, ", "))
+	}
+	if ev.Raced.Obs > 0 {
+		fmt.Fprintf(b, "      race:       %v with -race, %v without\n", ev.Raced, ev.Unraced)
 	}
 }
 

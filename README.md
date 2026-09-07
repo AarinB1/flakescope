@@ -29,7 +29,7 @@ flakescope [flags] <package>
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--runs N` | 20 | number of configurations to run; all distinct, see [Scale](#scale) |
+| `--runs N` | 20 | number of configurations to run; see [Scale](#scale) |
 | `--json` | off | emit the machine-readable report instead of text |
 | `--timeout D` | 10m | per-configuration timeout |
 | `--verbose` | off | list every configuration behind each failure group |
@@ -41,16 +41,22 @@ flakescope ./internal/queue
 
 FLAKY (2)
   TestDrainOrder
-      failed 6/20 configurations (30%), order-dependent
+      failed 5/20 configurations (25%), order-dependent
+      shuffle:    5/8 (62%) shuffled, 0/12 (0%) unshuffled
+      GOMAXPROCS: 1: 1/6 (17%), 2: 2/5 (40%), 4: 2/9 (22%)
+      race:       0/4 (0%) with -race, 5/16 (31%) without
       all failures share one signature (5c52562121918ec4)
       minimal repro: GOMAXPROCS=8 go test -shuffle=1 -count=1 ./internal/queue
   TestWorkerPool
-      failed 13/20 configurations (65%), load-dependent
+      failed 14/20 configurations (70%), load-dependent
+      shuffle:    6/8 (75%) shuffled, 8/12 (67%) unshuffled
+      GOMAXPROCS: 1: 0/6 (0%), 2: 5/5 (100%), 4: 9/9 (100%)
+      race:       3/4 (75%) with -race, 11/16 (69%) without
       2 distinct failure signatures:
       [b1471e97a40a01c3] 9 configurations
         |     pool_test.go:108: parallel execution exposed the bug: GOMAXPROCS=4
         minimal repro: GOMAXPROCS=4 go test -count=1 ./internal/queue
-      [235f6343f3c5fd50] 4 configurations
+      [235f6343f3c5fd50] 5 configurations
         |     pool_test.go:108: parallel execution exposed the bug: GOMAXPROCS=2
         minimal repro: GOMAXPROCS=2 go test -count=1 ./internal/queue
 
@@ -69,14 +75,49 @@ and it does not affect the exit code. A test that never failed is *never-fails*.
 Only a test that both passed and failed is *flaky*.
 
 **Dependence.** For each flaky test, flakescope names the knob its failures
-track:
+track, by comparing the failure RATE between the two arms of each axis:
 
-- *order-dependent* — every failure had `-shuffle` on and at least one
-  unshuffled run passed. The test depends on what ran before it.
-- *load-dependent* — every failure needed the race detector, or every failure
-  had strictly more processors than every pass.
-- *undetermined* — the failures do not line up with any single knob. Saying so
-  is better than guessing.
+- *order-dependent* — the failure rate with `-shuffle` on is materially higher
+  than the rate with it off. The test depends on what ran before it.
+- *load-dependent* — the rate rises with `GOMAXPROCS`, or under the race
+  detector.
+- *order-and-load-dependent* — both. The two axes are evaluated independently,
+  so neither can hide the other.
+- *undetermined* — neither difference is large enough to separate from noise.
+
+The rates are printed next to the label. A reader who can see `5/8` shuffled
+against `0/12` unshuffled can judge the claim; a bare label asks them to trust
+the classifier.
+
+A difference is reported only when both arms hold at least four observations,
+the higher arm fails at least twice as often, and the difference clears a
+pooled two-proportion z of 2. **This is what the tool can and cannot see:**
+
+| `--runs` | shuffle axis | `GOMAXPROCS` axis |
+| --- | --- | --- |
+| 20 (default) | 38% | 50% |
+| 60 | 14% | 20% |
+| 200 | 4% | 6% |
+| 1000 | 1% | 2% |
+
+A failure that reproduces 2% of the time - an ordinary rate for a real
+parallelism bug - is invisible below about a thousand runs, and flakescope says
+`undetermined` rather than guessing. When it does, it prints the rate that run
+could have resolved, so the next `--runs` is a number rather than a hunch:
+
+```
+  TestWorkerPool
+      failed 1/60 configurations (2%), undetermined
+      shuffle:    1/28 (4%) shuffled, 0/32 (0%) unshuffled
+      GOMAXPROCS: 1: 0/15 (0%), 2: 0/15 (0%), 4: 1/30 (3%)
+      no axis separates these failures; 60 configurations could not resolve a rate below 14%
+```
+
+Until v0.3.0 the order rule was checked first and asked only whether every
+failure happened to be shuffled. With a matrix that ran 56 of 60 configurations
+under a seed, that was true by chance for almost any test that failed at all,
+so almost every flaky test came back order-dependent and the load rule was
+unreachable behind it.
 
 **Failure clusters.** A test's failures are grouped by a normalized signature,
 so that the same bug seen twenty times is one finding rather than twenty. Each
@@ -171,6 +212,18 @@ still present and still populated.
       "classification": "flaky",  // flaky | always-fails | never-fails
       "dependence": "load-dependent",  // omitted when not flaky
       "minimal_config": { },      // as "base"; omitted when not flaky
+      "evidence": {               // the rates the label was read off; flaky tests only
+        "shuffled":   { "fail": 6, "observations": 8,  "rate": 0.75 },
+        "unshuffled": { "fail": 8, "observations": 12, "rate": 0.667 },
+        "by_gomaxprocs": [        // ascending; the first entry is the control arm
+          { "gomaxprocs": 1, "fail": 0, "observations": 6, "rate": 0 },
+          { "gomaxprocs": 2, "fail": 5, "observations": 5, "rate": 1 },
+          { "gomaxprocs": 4, "fail": 9, "observations": 9, "rate": 1 }
+        ],
+        "raced":   { "fail": 3,  "observations": 4,  "rate": 0.75 },
+        "unraced": { "fail": 11, "observations": 16, "rate": 0.6875 },
+        "smallest_resolvable_rate": 0.375   // null if no axis could resolve anything
+      },
       "clusters": [               // always present; empty if the test never failed
         {
           "signature": "b1471e97a40a01c3",   // sha256 of the normalized form, 8 bytes
@@ -189,6 +242,12 @@ Notes a consumer can rely on:
 
 - `clusters` is present on every test, as an empty array for one that never
   failed. Absence and emptiness are not two different states to handle.
+- `evidence` is new in v0.3.0 and appears exactly where `dependence` does: on
+  flaky tests. Its `smallest_resolvable_rate` is `null`, never absent, when no
+  axis had the observations to resolve anything.
+- Every field that existed before v0.3.0 still means what it meant. `evidence`
+  is additive, and a consumer that ignores it reads this report as it read the
+  last one.
 - The `count` values across a test's clusters sum to that test's `fail`.
 - Clusters are ordered by descending `count`, then by `signature`. The same
   matrix always produces the same order.
@@ -215,19 +274,27 @@ changes to them will be additive only.
 
 ## Scale
 
-flakescope generates every configuration distinctly. `--runs 1000` means a
-thousand different configurations, not a thousand invocations of forty of them,
-and a test enforces it: a repeated configuration costs a full `go test` and
-cannot change any count, rate or classification, so a matrix that quietly
-repeated itself would look identical to one that did not.
+The matrix is laid out over **cells**: one per (shuffle on or off) x
+`GOMAXPROCS` candidate, so eight cells in the usual case. Runs are dealt one per
+cell in rotation, which is what lets a failure rate be compared between arms
+rather than inferred from a single observation.
 
-Above the first handful of configurations the matrix scales by giving every run
-a shuffle seed no other run uses, cycling `GOMAXPROCS` through its candidates,
-and switching the race detector on for **one run in eight** rather than every
+Shuffled configurations are all distinct - every one carries a seed no other run
+uses, because a repeated seed reruns the same test order and buys nothing.
+Unshuffled configurations repeat, deliberately: there are only sixteen distinct
+unshuffled configurations in the whole space, so an arm large enough to state a
+rate must rerun the same command line. Two runs of one unshuffled configuration
+are two independent observations of a nondeterministic failure, which is the
+only way to learn that a test fails a fifth of the time rather than always or
+never. A test asserts both halves separately.
+
+The race detector is switched on for **one run in seven** rather than every
 other one. `-race` is the knob that dominates wall-clock and the one with the
 least to say - it answers a yes/no question, and a sample answers that as well
 as a census. For a race build costing 10x a plain one, alternating would make
-the matrix 5.5x a race-free run; one in eight makes it 2.1x.
+the matrix 5.5x a race-free run; one in seven makes it 2.3x. Seven is odd on
+purpose: the matrix flips shuffle on every run, so an even period would put
+every raced run in the same shuffle arm and confound the two axes.
 
 ### Measured
 
