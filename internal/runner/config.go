@@ -102,8 +102,8 @@ func (c Config) String() string {
 	return strings.Join(parts, " ")
 }
 
-// raceEvery is how often the tail of the matrix switches the race detector on:
-// one configuration in eight.
+// raceEvery is how often the matrix switches the race detector on: one
+// configuration in seven.
 //
 // RACE IS SAMPLED, NOT ALTERNATED. It is the knob that dominates wall-clock -
 // a race build is commonly several times slower to build and to run than a
@@ -114,11 +114,16 @@ func (c Config) String() string {
 //
 // The arithmetic, for a race build costing r times a plain one: alternating
 // makes the matrix 0.5 + 0.5r times a race-free run, which at r=10 is 5.5x.
-// One in eight makes it 0.875 + 0.125r, which at r=10 is 2.1x. Measured on
+// One in seven makes it 0.857 + 0.143r, which at r=10 is 2.3x. Measured on
 // this repository's own fixture r is only about 1.5, but that fixture is
 // dominated by the go tool's own startup; a real package is where the number
 // bites.
-const raceEvery = 8
+//
+// SEVEN IS ODD ON PURPOSE. The tail below flips shuffle on every configuration,
+// so an even period would land every raced run in the same shuffle arm: the
+// race sample would be perfectly confounded with test order, and a failure that
+// tracked one would be indistinguishable from a failure that tracked the other.
+const raceEvery = 7
 
 // Matrix returns n configurations derived from base.
 //
@@ -127,41 +132,86 @@ const raceEvery = 8
 // random source, because a matrix that differed between two invocations would
 // make every result flakescope reports unreproducible.
 //
+// # What the matrix is for
+//
+// internal/report classifies a flaky test by COMPARING FAILURE RATES between
+// arms of an axis: shuffled against unshuffled, and high GOMAXPROCS against the
+// lowest. A rate needs repeated observations under the same conditions. A
+// matrix that samples one arm sixty times and the other four cannot support a
+// comparison, and a classifier reading it will hand out whichever label the
+// sampling made likely - which is the bug this shape exists to remove.
+//
+// # Cells
+//
+// The matrix is laid out over CELLS: one per (shuffle on/off) x (GOMAXPROCS
+// candidate) pair. With the usual four candidates - base plus 1, 2 and 4 -
+// that is eight cells, and with a base that already sits on one of them, six.
+//
+// The tail fills them round-robin: shuffle flips every configuration and the
+// GOMAXPROCS candidate advances every two, so after the coverage prefix each
+// cell holds n/(2k) configurations to within one, where k is the number of
+// candidates. Nothing else in the tail varies with the cell index, so no cell
+// is systematically cheaper or more likely to be reached.
+//
+// # Replication, and why the unshuffled arm repeats itself
+//
+// Configuration is a four-knob space and Count is not an axis, so there are
+// only 2k distinct UNSHUFFLED configurations in the whole space - eight, in the
+// usual case. Any matrix that samples the unshuffled arm often enough to state
+// a rate must therefore run the same command line more than once. That is
+// replication, not waste: two runs of the same unshuffled configuration are two
+// independent observations of a nondeterministic failure, and they are the only
+// way to learn that it fails a fifth of the time rather than always or never.
+//
+// Shuffled configurations are a different matter, and they never repeat: every
+// one carries a seed no other configuration in the matrix uses. A repeated seed
+// at the same GOMAXPROCS and race setting reruns the same test ORDER, which is
+// the one thing the shuffled arm exists to vary. Duplicate-free where it buys
+// information, replicated where it must be.
+//
 // # The coverage prefix
 //
 // The matrix opens with base, then each axis varied ALONE: shuffle seed, then
 // race, then GOMAXPROCS. A short --runs has to be able to tell an
 // order-dependent failure from a load-dependent one, and it cannot if the
-// matrix combines knobs before it has tried them singly. That is three
-// configurations plus one per remaining GOMAXPROCS candidate - six in the usual
-// case, and never more than seven.
+// matrix combines knobs before it has tried them singly.
 //
 //	out[0]     base
 //	out[1]     base + a shuffle seed
 //	out[2]     base + the race detector flipped
 //	out[3...]  base + each other GOMAXPROCS candidate, one per configuration
 //
-// Every GOMAXPROCS candidate gets an unshuffled, unraced run of its own rather
-// than just the first candidate. Without that, the only unshuffled runs at
-// GOMAXPROCS values other than base's would be in the tail, where every
-// configuration carries a seed - and flakescope would report `-shuffle=3` as
-// part of the minimal way to reproduce a load-dependent failure that has
-// nothing to do with test order.
+// # What this matrix can and cannot distinguish
 //
-// # The tail
+// Under internal/report's comparison rule - a pooled two-proportion z of 2,
+// plus a doubling of the rate - with n configurations and k GOMAXPROCS
+// candidates, the shuffle axis compares two arms of about n/2 each and the
+// GOMAXPROCS axis compares the lowest candidate's n/k against the other
+// candidates' 3n/4 or so.
 //
-// Everything after that scales:
+// AT THE DEFAULT --runs 20 THAT IS 8 SHUFFLED AND 12 UNSHUFFLED RUNS, AND THE
+// SMALLEST FAILURE RATE IT CAN TELL FROM NOISE IS 38% ON THE SHUFFLE AXIS AND
+// 50% ON THE GOMAXPROCS AXIS. Twenty configurations settle whether a test fails
+// always, often, or not at all. They cannot settle anything finer, and a test
+// that failed once in twenty is reported as undetermined rather than labelled.
 //
-//	seed        a value no other configuration in the matrix uses
-//	GOMAXPROCS  cycled through the candidates, one per configuration
-//	race        on for one configuration in raceEvery
+// The rest of the curve, measured against this matrix rather than estimated,
+// for a base at GOMAXPROCS 8 (k=4) and at 4 (k=3):
 //
-// EVERY TAIL CONFIGURATION CARRIES A DISTINCT SEED, and that is what makes the
-// whole matrix duplicate-free at any n rather than only at small n. A repeated
-// configuration is a run that buys no information: it costs a full `go test`
-// and cannot change any count, rate or classification. A matrix that silently
-// repeated itself would let flakescope advertise a thousand runs and deliver
-// forty, and the report would look exactly the same either way.
+//	           shuffle axis   GOMAXPROCS axis
+//	--runs 20     38%            50-53%
+//	--runs 60     14%            20-24%
+//	--runs 200     4%             6- 8%
+//	--runs 1000    1%             1- 2%
+//
+// A failure that reproduces at 2%, which is an ordinary rate for a real
+// parallelism bug, therefore needs --runs of about a thousand before
+// flakescope will say anything about it at all. Saying so out loud is the
+// point: the alternative is a confident label read off two observations.
+//
+// Every cell is populated from n >= 2k+6 - 14 configurations in the usual case.
+// Below that the matrix is a coverage probe rather than a measurement, and the
+// classifier declines accordingly.
 //
 // Count does not vary. It is a user knob, not a hypothesis about why a test
 // fails, and varying it would multiply the matrix without changing which knob a
@@ -197,19 +247,25 @@ func Matrix(base Config, n int) []Config {
 		}
 	}
 
-	// The tail. seeds[0] is spent on the prefix, so the tail starts at seeds[1]
-	// and never revisits a seed the prefix used or one it used itself.
+	// The tail, one configuration per cell in rotation. seeds[0] is spent on the
+	// prefix, so the shuffled cells start at seeds[1].
+	//
+	// The unshuffled cells use seed 0 - shuffle genuinely OFF - even when base
+	// carries a seed of its own. The order axis is a comparison against a
+	// control arm, and a control arm that is itself shuffled is not one.
 	seed := 1
-	for i := len(out); ; i++ {
+	for j := 0; ; j++ {
 		cfg := Config{
-			ShuffleSeed: seeds[seed],
-			GOMAXPROCS:  procsAxis[i%len(procsAxis)],
+			GOMAXPROCS: procsAxis[(j/2)%len(procsAxis)],
 			// Not relative to base.Race: the reason to ration this knob is what
 			// running the detector costs, not how far it is from the default.
-			Race:  i%raceEvery == 0,
+			Race:  j%raceEvery == 0,
 			Count: base.Count,
 		}
-		seed++
+		if j%2 == 1 {
+			cfg.ShuffleSeed = seeds[seed]
+			seed++
+		}
 		if !add(cfg) {
 			return out
 		}
