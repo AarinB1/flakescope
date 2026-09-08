@@ -179,10 +179,12 @@ func TestMatrixShape(t *testing.T) {
 			}
 			seen := make(map[Config]bool, len(got))
 			for i, cfg := range got {
-				if seen[cfg] {
-					t.Errorf("Matrix()[%d] = %+v is a duplicate; a repeated configuration buys no information", i, cfg)
+				if cfg.Shuffled() {
+					if seen[cfg] {
+						t.Errorf("Matrix()[%d] = %+v repeats a shuffled configuration; the same seed at the same knobs reruns the same test order", i, cfg)
+					}
+					seen[cfg] = true
 				}
-				seen[cfg] = true
 				if cfg.Count != tc.base.Count {
 					t.Errorf("Matrix()[%d] varied Count to %d; Count is not an axis", i, cfg.Count)
 				}
@@ -290,12 +292,19 @@ func TestMatrixAtScale(t *testing.T) {
 
 				seen := make(map[Config]int, n)
 				for i, cfg := range got {
+					if !cfg.Shuffled() {
+						// Unshuffled configurations repeat by design; see
+						// TestMatrixReplicatesOnlyWhereItMust for the rule.
+						continue
+					}
 					if first, dup := seen[cfg]; dup {
 						t.Fatalf("configuration %d repeats configuration %d: %s\n"+
-							"a repeated run costs a full `go test` and buys no information",
+							"a repeated shuffled configuration reruns the same test order and buys no information",
 							i, first, cfg)
 					}
 					seen[cfg] = i
+				}
+				for i, cfg := range got {
 					if cfg.Count != b.base.Count {
 						t.Fatalf("configuration %d varied Count to %d; Count is not an axis", i, cfg.Count)
 					}
@@ -350,38 +359,231 @@ func TestMatrixRationsTheRaceDetector(t *testing.T) {
 	}
 }
 
-// TestMatrixSpreadsSeedsAndCyclesProcessors pins the other two halves of the
-// scale rule. Without distinct seeds the matrix cannot stay duplicate-free at
-// size; without cycling GOMAXPROCS a thousand runs would all sit at one
-// processor count.
-func TestMatrixSpreadsSeedsAndCyclesProcessors(t *testing.T) {
-	base := Config{GOMAXPROCS: 8, Count: 1}
-	const n = 1000
-	got := Matrix(base, n)
+// cellOf names the (shuffle, GOMAXPROCS) cell a configuration falls in. The
+// classifier compares failure rates between these cells, so a cell that is
+// empty or starved makes the corresponding classification unreachable - which
+// is the shape of the bug this matrix was rebalanced to remove.
+func cellOf(c Config) string {
+	shuffle := "unshuffled"
+	if c.Shuffled() {
+		shuffle = "shuffled"
+	}
+	return fmt.Sprintf("%s/P%d", shuffle, c.GOMAXPROCS)
+}
 
-	seeds := make(map[int64]bool, n)
-	procs := map[int]int{}
-	for _, cfg := range got {
-		procs[cfg.GOMAXPROCS]++
-		if cfg.Shuffled() {
-			if seeds[cfg.ShuffleSeed] {
-				t.Fatalf("shuffle seed %d is used twice", cfg.ShuffleSeed)
-			}
-			seeds[cfg.ShuffleSeed] = true
+func cellCounts(configs []Config) map[string]int {
+	out := map[string]int{}
+	for _, c := range configs {
+		out[cellOf(c)]++
+	}
+	return out
+}
+
+// TestMatrixPopulatesEveryCell is the assertion the old matrix could not have
+// made. It sampled 56 of 60 configurations shuffled, so the unshuffled cells at
+// each GOMAXPROCS held one run apiece and "the failure rate without shuffle"
+// was not a quantity the matrix could produce.
+//
+// The guarantee is stated on Matrix: every cell is populated from n >= 2k+6.
+func TestMatrixPopulatesEveryCell(t *testing.T) {
+	tests := []struct {
+		name      string
+		base      Config
+		wantCells int
+	}{
+		{"default-shaped base", Config{GOMAXPROCS: 8, Count: 1}, 8},
+		{"base GOMAXPROCS coincides with a candidate", Config{GOMAXPROCS: 4, Count: 1}, 6},
+		{"single processor base", Config{GOMAXPROCS: 1, Count: 1}, 6},
+		{"base already shuffled", Config{ShuffleSeed: 5, GOMAXPROCS: 8, Count: 1}, 8},
+		{"base already racing", Config{GOMAXPROCS: 8, Race: true, Count: 1}, 8},
+	}
+	for _, tc := range tests {
+		for _, n := range []int{16, 20, 60, 200, 1000} {
+			t.Run(fmt.Sprintf("%s/%d", tc.name, n), func(t *testing.T) {
+				cells := cellCounts(Matrix(tc.base, n))
+				if len(cells) != tc.wantCells {
+					t.Fatalf("--runs %d covered %d cells (%v), want %d", n, len(cells), cells, tc.wantCells)
+				}
+				for cell, count := range cells {
+					if count == 0 {
+						t.Errorf("cell %s is empty at --runs %d", cell, n)
+					}
+				}
+			})
 		}
 	}
+}
 
-	// Nearly every configuration should carry a seed of its own; only the
-	// coverage prefix runs unshuffled.
-	if len(seeds) < n-len(procs)-2 {
-		t.Errorf("only %d distinct shuffle seeds across %d configurations", len(seeds), n)
+// TestMatrixBalancesCells is the other half of the same claim. A populated cell
+// that holds one configuration while its neighbour holds fifty supports no rate
+// comparison either, and the old matrix was populated in exactly that sense.
+//
+// The bound is the design: the tail deals one configuration per cell in
+// rotation, so cells differ by at most one from the tail alone, plus the
+// coverage prefix, which lands twice in the base's unshuffled cell and once in
+// each other cell it touches.
+func TestMatrixBalancesCells(t *testing.T) {
+	const slack = 3
+
+	for _, base := range []Config{{GOMAXPROCS: 8, Count: 1}, {GOMAXPROCS: 4, Count: 1}} {
+		for _, n := range []int{60, 200, 1000} {
+			t.Run(fmt.Sprintf("P%d/%d", base.GOMAXPROCS, n), func(t *testing.T) {
+				cells := cellCounts(Matrix(base, n))
+				lo, hi := n, 0
+				for _, count := range cells {
+					if count < lo {
+						lo = count
+					}
+					if count > hi {
+						hi = count
+					}
+				}
+				if hi-lo > slack {
+					t.Errorf("cell counts range from %d to %d at --runs %d (%v); "+
+						"a rate compared across cells this uneven is not a comparison",
+						lo, hi, n, cells)
+				}
+				want := n / len(cells)
+				if lo < want-slack {
+					t.Errorf("the smallest cell holds %d configurations at --runs %d, want about %d (%v)",
+						lo, n, want, cells)
+				}
+			})
+		}
+	}
+}
+
+// TestMatrixReplicatesOnlyWhereItMust states the duplicate rule in the form the
+// rate comparison actually needs.
+//
+// There are only 2k distinct unshuffled configurations in the whole space, so
+// an unshuffled arm large enough to state a rate MUST rerun the same command
+// line. Those repeats are independent observations of a nondeterministic
+// failure and are the point. A repeated shuffle SEED is not: it reruns the same
+// test order, which is the one thing the shuffled arm exists to vary.
+func TestMatrixReplicatesOnlyWhereItMust(t *testing.T) {
+	for _, base := range []Config{{GOMAXPROCS: 8, Count: 1}, {GOMAXPROCS: 4, Count: 1}, {ShuffleSeed: 5, GOMAXPROCS: 2, Count: 1}} {
+		for _, n := range []int{20, 200, 1000} {
+			t.Run(fmt.Sprintf("%s/%d", base, n), func(t *testing.T) {
+				got := Matrix(base, n)
+
+				seen := map[Config]bool{}
+				shuffled := 0
+				for _, cfg := range got {
+					if !cfg.Shuffled() {
+						continue
+					}
+					shuffled++
+					if seen[cfg] {
+						t.Fatalf("shuffled configuration %s appears twice", cfg)
+					}
+					seen[cfg] = true
+				}
+				if shuffled != len(seen) {
+					t.Fatalf("%d shuffled configurations, %d of them distinct", shuffled, len(seen))
+				}
+				// Stronger than exact equality: every seed the matrix invents is
+				// used once and once only, so no two configurations anywhere run
+				// the same test order. Base's own seed is the exception, because
+				// the coverage prefix carries it to each other GOMAXPROCS and to
+				// the flipped race setting - one knob from base, by design.
+				seedUses := map[int64]int{}
+				for _, cfg := range got {
+					if cfg.Shuffled() && cfg.ShuffleSeed != base.ShuffleSeed {
+						seedUses[cfg.ShuffleSeed]++
+					}
+				}
+				for seed, uses := range seedUses {
+					if uses > 1 {
+						t.Fatalf("shuffle seed %d is used %d times; only base's own seed may repeat", seed, uses)
+					}
+				}
+
+				// Replication is bounded by the cell size: an unshuffled
+				// configuration may repeat as often as its cell is deep, and no
+				// deeper. Unbounded repetition would be the old failure mode
+				// wearing new clothes - a thousand runs' worth of `go test` for
+				// one cell's worth of information.
+				cells := len(cellCounts(got))
+				limit := n/cells + 4
+				repeats := map[Config]int{}
+				for _, cfg := range got {
+					repeats[cfg]++
+					if repeats[cfg] > limit {
+						t.Fatalf("configuration %s appears %d times at --runs %d, more than the %d its cell can hold",
+							cfg, repeats[cfg], n, limit)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestMatrixSamplesBothShuffleArms is what the order axis rests on: neither arm
+// may be a token. The old matrix put 56 of 60 configurations in the shuffled
+// arm, which is how "all failures were shuffled" became true by construction.
+func TestMatrixSamplesBothShuffleArms(t *testing.T) {
+	for _, base := range []Config{{GOMAXPROCS: 8, Count: 1}, {GOMAXPROCS: 4, Count: 1}} {
+		for _, n := range []int{20, 60, 200, 1000} {
+			t.Run(fmt.Sprintf("P%d/%d", base.GOMAXPROCS, n), func(t *testing.T) {
+				shuffled := 0
+				for _, cfg := range Matrix(base, n) {
+					if cfg.Shuffled() {
+						shuffled++
+					}
+				}
+				frac := float64(shuffled) / float64(n)
+				if frac < 0.35 || frac > 0.65 {
+					t.Errorf("%d/%d configurations are shuffled (%.0f%%), want between 35%% and 65%%; "+
+						"an arm this lopsided cannot be compared against the other",
+						shuffled, n, frac*100)
+				}
+			})
+		}
+	}
+}
+
+// TestMatrixDoesNotConfoundRaceWithShuffle guards the odd race period. With an
+// even one, every raced configuration would land in the same shuffle arm, and a
+// failure that needed the detector would be indistinguishable from one that
+// needed a particular test order.
+func TestMatrixDoesNotConfoundRaceWithShuffle(t *testing.T) {
+	for _, n := range []int{60, 200, 1000} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			var racedShuffled, racedUnshuffled int
+			for _, cfg := range Matrix(Config{GOMAXPROCS: 8, Count: 1}, n) {
+				if !cfg.Race {
+					continue
+				}
+				if cfg.Shuffled() {
+					racedShuffled++
+				} else {
+					racedUnshuffled++
+				}
+			}
+			if racedShuffled == 0 || racedUnshuffled == 0 {
+				t.Errorf("the %d raced configurations at --runs %d are all in one shuffle arm (%d shuffled, %d unshuffled); "+
+					"the race sample is confounded with test order",
+					racedShuffled+racedUnshuffled, n, racedShuffled, racedUnshuffled)
+			}
+		})
+	}
+}
+
+// TestMatrixCyclesProcessors: without cycling, a thousand runs would all sit at
+// one processor count and the GOMAXPROCS axis would have nothing to compare.
+func TestMatrixCyclesProcessors(t *testing.T) {
+	base := Config{GOMAXPROCS: 8, Count: 1}
+	const n = 1000
+	procs := map[int]int{}
+	for _, cfg := range Matrix(base, n) {
+		procs[cfg.GOMAXPROCS]++
 	}
 	for _, want := range []int{1, 2, 4, 8} {
 		if procs[want] == 0 {
 			t.Errorf("a %d-run matrix never tries GOMAXPROCS=%d", n, want)
 		}
 	}
-	// Cycling, not clustering: no single processor count may dominate.
 	for value, count := range procs {
 		if float64(count)/float64(n) > 0.5 {
 			t.Errorf("GOMAXPROCS=%d accounts for %d/%d configurations; the axis is not being cycled",

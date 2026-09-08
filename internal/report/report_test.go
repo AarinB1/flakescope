@@ -90,19 +90,25 @@ func TestClassificationFromRecordedStreams(t *testing.T) {
 			wantFail:       2,
 		},
 		{
-			name:           "order dependent: fails only under shuffle",
+			// Flaky on one failure and two passes, and UNDETERMINED on why.
+			// Three configurations cannot carry a rate: this test failed in the
+			// one shuffled configuration there was, which is the observation
+			// the old classifier read as proof of order dependence and which is
+			// equally consistent with a coin landing once. The four fixtures in
+			// TestClassifiesRecordedStreamsByRate supply the runs this cannot.
+			name:           "order dependent, but not on three configurations",
 			test:           "TestOrderDependent",
 			wantClass:      ClassFlaky,
-			wantDependence: DependenceOrder,
+			wantDependence: DependenceUndetermined,
 			wantFail:       1,
 			wantPass:       2,
 			wantMinimal:    &cfgShuffled,
 		},
 		{
-			name:           "load dependent: fails only above a GOMAXPROCS threshold",
+			name:           "load dependent, but not on three configurations",
 			test:           "TestLoadDependent",
 			wantClass:      ClassFlaky,
-			wantDependence: DependenceLoad,
+			wantDependence: DependenceUndetermined,
 			wantFail:       1,
 			wantPass:       1,
 			wantMinimal:    &cfgFourP,
@@ -319,18 +325,65 @@ func TestMinimalConfiguration(t *testing.T) {
 	}
 }
 
-// TestDependence includes the fixtures that break each rule, not just the ones
-// that satisfy it. An "order-dependent" verdict that survives a counterexample
-// is not a verdict.
+// dependenceOf runs the real path a report takes: configurations in, evidence
+// tallied, label read off the evidence. Going through evidenceFor rather than
+// constructing an Evidence by hand is what keeps these rows honest - a tally
+// that dropped half the observations would leave every table below green.
+func dependenceOf(failedIn, passedIn []runner.Config) (Dependence, Evidence) {
+	failures := make([]failure, 0, len(failedIn))
+	for _, cfg := range failedIn {
+		failures = append(failures, failure{config: cfg})
+	}
+	t := Test{
+		Pass: len(passedIn), Fail: len(failedIn),
+		failures: failures, passedIn: passedIn,
+	}
+	ev := evidenceFor(t)
+	return dependence(ev), ev
+}
+
+// repeat is how a rate is expressed in a table: n runs of one configuration,
+// f of which failed. The unshuffled arm of any real matrix is built the same
+// way, because there are only a handful of distinct unshuffled configurations
+// to run (see runner.Matrix).
+func repeat(cfg runner.Config, n int) []runner.Config {
+	out := make([]runner.Config, n)
+	for i := range out {
+		out[i] = cfg
+	}
+	return out
+}
+
+// shuffledRuns returns n configurations at procs, each with its own seed, the
+// way the matrix generates them.
+func shuffledRuns(procs, n int, race bool) []runner.Config {
+	out := make([]runner.Config, 0, n)
+	for i := 1; i <= n; i++ {
+		out = append(out, runner.Config{GOMAXPROCS: procs, ShuffleSeed: int64(i), Race: race})
+	}
+	return out
+}
+
+func concat(groups ...[]runner.Config) []runner.Config {
+	var out []runner.Config
+	for _, g := range groups {
+		out = append(out, g...)
+	}
+	return out
+}
+
+// TestDependence is the rewritten classifier's table. Every row states counts,
+// not the presence or absence of a failure, because the presence of a failure
+// in an arm is exactly what the previous implementation mistook for evidence.
+//
+// The rows that MUST NOT produce a label are the point of the table. A rule
+// that only ever fires is not a rule.
 func TestDependence(t *testing.T) {
 	var (
-		plain     = runner.Config{GOMAXPROCS: 4}
-		plain1    = runner.Config{GOMAXPROCS: 1}
-		plain2    = runner.Config{GOMAXPROCS: 2}
-		shuffled  = runner.Config{GOMAXPROCS: 4, ShuffleSeed: 1}
-		shuffled1 = runner.Config{GOMAXPROCS: 1, ShuffleSeed: 2}
-		raced     = runner.Config{GOMAXPROCS: 4, Race: true}
-		raced1    = runner.Config{GOMAXPROCS: 1, Race: true}
+		plain1 = runner.Config{GOMAXPROCS: 1}
+		plain2 = runner.Config{GOMAXPROCS: 2}
+		plain4 = runner.Config{GOMAXPROCS: 4}
+		raced4 = runner.Config{GOMAXPROCS: 4, Race: true}
 	)
 
 	tests := []struct {
@@ -340,84 +393,661 @@ func TestDependence(t *testing.T) {
 		want     Dependence
 	}{
 		{
-			name:     "order: every failure shuffled, an unshuffled run passed",
-			failedIn: []runner.Config{shuffled, shuffled1},
-			passedIn: []runner.Config{plain, plain1},
+			// The wild case, in miniature: one failure, and it happened to be
+			// shuffled. The old rule labelled this order-dependent because
+			// every failure was shuffled and something unshuffled passed. Both
+			// of those remain true here.
+			name:     "one failure in sixty supports nothing, even though it was shuffled",
+			failedIn: shuffledRuns(4, 1, false),
+			passedIn: concat(shuffledRuns(4, 29, false)[1:], repeat(plain4, 15), repeat(plain1, 16)),
+			want:     DependenceUndetermined,
+		},
+		{
+			// One GOMAXPROCS value throughout, so the load axis has no second
+			// arm and cannot contribute. The rows that isolate one axis do this
+			// deliberately: a row that moves two knobs cannot say which rule
+			// decided it.
+			name:     "order: 14/28 shuffled against 0/28 unshuffled",
+			failedIn: shuffledRuns(4, 14, false),
+			passedIn: concat(shuffledRuns(4, 28, false)[14:], repeat(plain4, 28)),
 			want:     DependenceOrder,
 		},
 		{
-			name:     "NOT order: one failure happened without shuffle",
-			failedIn: []runner.Config{shuffled, plain},
-			passedIn: []runner.Config{plain1},
-			want:     DependenceLoad, // 4 and 4 fail, 1 passes: a threshold
+			name:     "NOT order: the shuffled arm fails more, but not twice as often",
+			failedIn: concat(shuffledRuns(4, 11, false), repeat(plain4, 20)),
+			passedIn: concat(shuffledRuns(4, 30, false)[11:], repeat(plain4, 40)),
+			want:     DependenceUndetermined,
 		},
 		{
-			name:     "NOT order: nothing unshuffled ever passed, so shuffle is unproven",
-			failedIn: []runner.Config{shuffled, shuffled1},
-			passedIn: []runner.Config{{GOMAXPROCS: 4, ShuffleSeed: 3}},
-			want:     DependenceUnknown,
+			name:     "NOT order: a doubled rate on two observations is not a rate",
+			failedIn: shuffledRuns(4, 2, false),
+			passedIn: repeat(plain4, 20),
+			want:     DependenceUndetermined,
 		},
 		{
-			name:     "load: every failure raced, an unraced run passed",
-			failedIn: []runner.Config{raced, raced1},
-			passedIn: []runner.Config{plain, plain1},
+			name:     "NOT order: nothing unshuffled was ever run, so shuffle has no control arm",
+			failedIn: shuffledRuns(4, 10, false),
+			passedIn: shuffledRuns(4, 20, false)[10:],
+			want:     DependenceUndetermined,
+		},
+		{
+			name:     "load, strong case: a clean GOMAXPROCS threshold with observations behind it",
+			failedIn: concat(repeat(plain4, 10), repeat(plain2, 10)),
+			passedIn: repeat(plain1, 10),
 			want:     DependenceLoad,
 		},
 		{
-			name:     "load: GOMAXPROCS threshold, every failure above every pass",
-			failedIn: []runner.Config{plain2, plain},
-			passedIn: []runner.Config{plain1},
+			name:     "load, general case: 4/100 above the threshold against 0/100 below it",
+			failedIn: repeat(plain4, 4),
+			passedIn: concat(repeat(plain4, 96), repeat(plain1, 100)),
 			want:     DependenceLoad,
 		},
 		{
-			name:     "NOT load: the GOMAXPROCS ranges overlap",
-			failedIn: []runner.Config{plain1, plain},
-			passedIn: []runner.Config{plain2, plain1},
-			want:     DependenceUnknown,
+			// The raced runs are split evenly across the processor counts, so
+			// the GOMAXPROCS arms fail at the same rate and only the race arm
+			// moves.
+			name:     "load: the race detector's arm, not GOMAXPROCS",
+			failedIn: concat(repeat(raced4, 4), repeat(runner.Config{GOMAXPROCS: 1, Race: true}, 4)),
+			passedIn: concat(repeat(plain4, 40), repeat(plain1, 40)),
+			want:     DependenceLoad,
 		},
 		{
-			name:     "NOT load: a failure at the same GOMAXPROCS as a pass is not a threshold",
-			failedIn: []runner.Config{plain2},
-			passedIn: []runner.Config{plain2},
-			want:     DependenceUnknown,
+			name:     "NOT load: the same rate at every GOMAXPROCS",
+			failedIn: concat(repeat(plain4, 5), repeat(plain2, 5), repeat(plain1, 5)),
+			passedIn: concat(repeat(plain4, 15), repeat(plain2, 15), repeat(plain1, 15)),
+			want:     DependenceUndetermined,
 		},
 		{
-			name:     "order beats load when both could be claimed",
-			failedIn: []runner.Config{shuffled},
-			passedIn: []runner.Config{plain1},
-			want:     DependenceOrder,
+			name:     "NOT load: one failure at four processors and one pass at one is not a threshold",
+			failedIn: repeat(plain4, 1),
+			passedIn: repeat(plain1, 1),
+			want:     DependenceUndetermined,
+		},
+		{
+			// Shuffled fails at 10/40 against 2/40 unshuffled, and four
+			// processors at 12/40 against nothing at one. Both rise, and the
+			// label says both rather than whichever rule is written first.
+			name: "both: the shuffled arm and the loaded arm each rise",
+			failedIn: concat(
+				shuffledRuns(4, 10, false),
+				repeat(plain4, 2),
+			),
+			passedIn: concat(
+				shuffledRuns(4, 20, false)[10:],
+				repeat(plain4, 18),
+				shuffledRuns(1, 20, false),
+				repeat(plain1, 20),
+			),
+			want: DependenceBoth,
 		},
 		{
 			name:     "no failures at all",
 			failedIn: nil,
-			passedIn: []runner.Config{plain},
-			want:     DependenceUnknown,
+			passedIn: repeat(plain4, 20),
+			want:     DependenceUndetermined,
 		},
 		{
 			name:     "no passes at all",
-			failedIn: []runner.Config{plain},
+			failedIn: repeat(plain4, 20),
 			passedIn: nil,
-			want:     DependenceUnknown,
+			want:     DependenceUndetermined,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// dependence reads the configurations off Test.failures, which
-			// clustering also reads the output off. These rows are about
-			// configurations only, so the output is left empty.
-			failures := make([]failure, 0, len(tc.failedIn))
-			for _, cfg := range tc.failedIn {
-				failures = append(failures, failure{config: cfg})
-			}
-			got := dependence(Test{
-				Pass: len(tc.passedIn), Fail: len(tc.failedIn),
-				failures: failures, passedIn: tc.passedIn,
-			})
+			got, ev := dependenceOf(tc.failedIn, tc.passedIn)
 			if got != tc.want {
-				t.Errorf("dependence() = %v, want %v", got, tc.want)
+				t.Errorf("dependence() = %v, want %v\n  shuffle: %v vs %v\n  procs:   %v vs %v",
+					got, tc.want, ev.Shuffled, ev.Unshuffled, ev.HigherProcs(), ev.LowestProcs())
 			}
 		})
+	}
+}
+
+// TestDependenceIsNotDecidedByRuleOrder is the regression this rewrite exists
+// for. Evaluating the order rule first made the load rule unreachable for any
+// test the order rule claimed, and with a matrix that was 93% shuffled the
+// order rule claimed nearly everything.
+//
+// The row below is a load-dependent test whose failures all happen to be
+// shuffled - which is what a lopsided matrix produces - alongside an unshuffled
+// pass at a lower processor count. The old rule read that as order-dependent.
+// The rates say otherwise: the shuffled and unshuffled arms fail at the same
+// rate at each processor count, and the processor count is what moves.
+func TestDependenceIsNotDecidedByRuleOrder(t *testing.T) {
+	failedIn := concat(
+		shuffledRuns(4, 20, false),
+		repeat(runner.Config{GOMAXPROCS: 4}, 20),
+	)
+	passedIn := concat(
+		shuffledRuns(1, 20, false),
+		repeat(runner.Config{GOMAXPROCS: 1}, 20),
+	)
+
+	got, ev := dependenceOf(failedIn, passedIn)
+	if got != DependenceLoad {
+		t.Errorf("dependence() = %v, want %v; the shuffled and unshuffled arms fail at %v and %v, "+
+			"while GOMAXPROCS moves from %v to %v",
+			got, DependenceLoad, ev.Shuffled, ev.Unshuffled, ev.LowestProcs(), ev.HigherProcs())
+	}
+	if ev.OrderRises() {
+		t.Errorf("the order axis claims a rise from %v to %v, which is the same rate", ev.Unshuffled, ev.Shuffled)
+	}
+}
+
+// TestEvidenceTallies pins the arithmetic the labels rest on. A tally that
+// dropped observations, or counted a raced run in both race arms, would leave
+// every classification table in this file passing for the wrong reason.
+func TestEvidenceTallies(t *testing.T) {
+	failedIn := []runner.Config{
+		{GOMAXPROCS: 4, ShuffleSeed: 1},
+		{GOMAXPROCS: 4, Race: true},
+	}
+	passedIn := []runner.Config{
+		{GOMAXPROCS: 1},
+		{GOMAXPROCS: 1},
+		{GOMAXPROCS: 2, ShuffleSeed: 2},
+	}
+	_, ev := dependenceOf(failedIn, passedIn)
+
+	tests := []struct {
+		name string
+		got  Rate
+		want Rate
+	}{
+		{"shuffled", ev.Shuffled, Rate{Fail: 1, Obs: 2}},
+		{"unshuffled", ev.Unshuffled, Rate{Fail: 1, Obs: 3}},
+		{"raced", ev.Raced, Rate{Fail: 1, Obs: 1}},
+		{"unraced", ev.Unraced, Rate{Fail: 1, Obs: 4}},
+		{"lowest GOMAXPROCS", ev.LowestProcs(), Rate{Fail: 0, Obs: 2}},
+		{"above the lowest", ev.HigherProcs(), Rate{Fail: 2, Obs: 3}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got.Fail != tc.want.Fail || tc.got.Obs != tc.want.Obs {
+				t.Errorf("%s = %d/%d, want %d/%d", tc.name, tc.got.Fail, tc.got.Obs, tc.want.Fail, tc.want.Obs)
+			}
+		})
+	}
+
+	want := []int{1, 2, 4}
+	if len(ev.ByGOMAXPROCS) != len(want) {
+		t.Fatalf("ByGOMAXPROCS = %v, want one entry per processor count %v", ev.ByGOMAXPROCS, want)
+	}
+	for i, procs := range want {
+		if ev.ByGOMAXPROCS[i].GOMAXPROCS != procs {
+			t.Errorf("ByGOMAXPROCS[%d] is GOMAXPROCS=%d, want %d ascending", i, ev.ByGOMAXPROCS[i].GOMAXPROCS, procs)
+		}
+	}
+}
+
+// TestHigherThan walks the three conditions one at a time. Each row is decided
+// by exactly one of them, with the other two satisfied, so removing a condition
+// breaks a specific row rather than the whole table.
+func TestHigherThan(t *testing.T) {
+	tests := []struct {
+		name   string
+		hi, lo Rate
+		want   bool
+	}{
+		{
+			name: "all three conditions met",
+			hi:   Rate{Fail: 14, Obs: 28}, lo: Rate{Fail: 0, Obs: 28},
+			want: true,
+		},
+		{
+			name: "observations: the rate is 100% but there are three of them",
+			hi:   Rate{Fail: 3, Obs: 3}, lo: Rate{Fail: 0, Obs: 30},
+			want: false,
+		},
+		{
+			name: "observations: the control arm is the thin one",
+			hi:   Rate{Fail: 30, Obs: 60}, lo: Rate{Fail: 0, Obs: 3},
+			want: false,
+		},
+		{
+			name: "materiality: a real difference that is not a doubling",
+			hi:   Rate{Fail: 590, Obs: 1000}, lo: Rate{Fail: 500, Obs: 1000},
+			want: false,
+		},
+		{
+			name: "noise: a doubling that four observations could have produced",
+			hi:   Rate{Fail: 2, Obs: 4}, lo: Rate{Fail: 1, Obs: 4},
+			want: false,
+		},
+		{
+			name: "the same doubling, with the observations to support it",
+			hi:   Rate{Fail: 200, Obs: 400}, lo: Rate{Fail: 100, Obs: 400},
+			want: true,
+		},
+		{
+			name: "2% against 0%, which is the wild case: not enough runs",
+			hi:   Rate{Fail: 2, Obs: 100}, lo: Rate{Fail: 0, Obs: 100},
+			want: false,
+		},
+		{
+			name: "2% against 0%, with the runs to see it",
+			hi:   Rate{Fail: 15, Obs: 750}, lo: Rate{Fail: 0, Obs: 250},
+			want: true,
+		},
+		{
+			name: "lower is not higher",
+			hi:   Rate{Fail: 0, Obs: 100}, lo: Rate{Fail: 40, Obs: 100},
+			want: false,
+		},
+		{
+			name: "identical arms",
+			hi:   Rate{Fail: 50, Obs: 100}, lo: Rate{Fail: 50, Obs: 100},
+			want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := higherThan(tc.hi, tc.lo); got != tc.want {
+				t.Errorf("higherThan(%v, %v) = %v, want %v", tc.hi, tc.lo, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolution is the number the report prints beside an undetermined
+// verdict. It has to be the truth about the run rather than a comfortable
+// figure: a run of twenty configurations could not have resolved one in ten,
+// and saying it could would be worse than saying nothing.
+func TestResolution(t *testing.T) {
+	tests := []struct {
+		name   string
+		hi, lo Rate
+		wantOK bool
+		want   float64
+	}{
+		{"the default run count", Rate{Obs: 8}, Rate{Obs: 12}, true, 3.0 / 8.0},
+		{"sixty configurations", Rate{Obs: 28}, Rate{Obs: 32}, true, 4.0 / 28.0},
+		{"a thousand configurations", Rate{Obs: 498}, Rate{Obs: 502}, true, 4.0 / 498.0},
+		{"the load axis at a thousand", Rate{Obs: 751}, Rate{Obs: 249}, true, 12.0 / 751.0},
+		{"too few observations to resolve anything", Rate{Obs: 3}, Rate{Obs: 3}, false, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := resolution(tc.hi, tc.lo)
+			if ok != tc.wantOK {
+				t.Fatalf("resolution(%v, %v) ok = %v, want %v", tc.hi, tc.lo, ok, tc.wantOK)
+			}
+			if ok && got != tc.want {
+				t.Errorf("resolution(%v, %v) = %.4f, want %.4f", tc.hi, tc.lo, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolutionIsAchievable is the assertion that makes the printed number
+// mean something: a run really would have reported a failure rate at the
+// resolution it claims, and really would not have reported one just below it.
+func TestResolutionIsAchievable(t *testing.T) {
+	for _, arms := range [][2]int{{8, 12}, {28, 32}, {98, 102}, {751, 249}} {
+		hi, lo := Rate{Obs: arms[0]}, Rate{Obs: arms[1]}
+		res, ok := resolution(hi, lo)
+		if !ok {
+			t.Fatalf("resolution(%v, %v) reported nothing", hi, lo)
+		}
+		at := int(res*float64(hi.Obs) + 0.5)
+		if !higherThan(Rate{Fail: at, Obs: hi.Obs}, lo) {
+			t.Errorf("%d/%d against 0/%d is the claimed resolution but is not reported",
+				at, hi.Obs, lo.Obs)
+		}
+		if at > 1 && higherThan(Rate{Fail: at - 1, Obs: hi.Obs}, lo) {
+			t.Errorf("%d/%d against 0/%d is below the claimed resolution and is still reported",
+				at-1, hi.Obs, lo.Obs)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The four cases the previous classifier got wrong
+// ---------------------------------------------------------------------------
+
+// replayer answers a configuration with a recorded stream, parsing each stream
+// once and handing the same parsed run back for every replicate of it.
+//
+// The replicates are the point. A rate needs repeated observations under one
+// configuration, so a fixture that expresses "fails 2% of the time at four
+// processors" answers 4 of 200 four-processor configurations with the recording
+// of a run that failed and the other 196 with the recording of a run that
+// passed - both of them made under that exact configuration (CLAUDE.md rule 5,
+// and see PROVENANCE.md for why two recordings of one configuration is what
+// rule 5 looks like for a nondeterministic fixture).
+type replayer struct {
+	t     *testing.T
+	cache map[string]*gotest.Run
+}
+
+func newReplayer(t *testing.T) *replayer {
+	t.Helper()
+	return &replayer{t: t, cache: make(map[string]*gotest.Run)}
+}
+
+func (r *replayer) parse(stream string) *gotest.Run {
+	r.t.Helper()
+	if run, ok := r.cache[stream]; ok {
+		return run
+	}
+	b, err := os.ReadFile(filepath.Join("..", "..", "testdata", "streams", stream))
+	if err != nil {
+		r.t.Fatalf("reading recorded stream: %v", err)
+	}
+	run, err := gotest.ParseBytes(b)
+	if err != nil {
+		r.t.Fatalf("parsing %s: %v", stream, err)
+	}
+	r.cache[stream] = run
+	return run
+}
+
+// times returns n results for cfg, all replaying stream.
+func (r *replayer) times(cfg runner.Config, stream string, n int) []runner.Result {
+	r.t.Helper()
+	run := r.parse(stream)
+	out := make([]runner.Result, n)
+	for i := range out {
+		out[i] = runner.Result{Config: cfg, Outcome: runner.OutcomeCompleted, Run: run}
+	}
+	return out
+}
+
+func results(groups ...[]runner.Result) []runner.Result {
+	var out []runner.Result
+	for _, g := range groups {
+		out = append(out, g...)
+	}
+	return out
+}
+
+// The configurations the recordings were made under, named so that a mismatch
+// between a configuration and its stream is visible at the call site.
+var (
+	cfgP1          = runner.Config{GOMAXPROCS: 1, Count: 1}
+	cfgP2          = runner.Config{GOMAXPROCS: 2, Count: 1}
+	cfgP4          = runner.Config{GOMAXPROCS: 4, Count: 1}
+	cfgP1Shuffled1 = runner.Config{GOMAXPROCS: 1, ShuffleSeed: 1, Count: 1}
+	cfgP2Shuffled1 = runner.Config{GOMAXPROCS: 2, ShuffleSeed: 1, Count: 1}
+	cfgP4Shuffled1 = runner.Config{GOMAXPROCS: 4, ShuffleSeed: 1, Count: 1}
+)
+
+// orderDependentResults: TestOrderDependent fails whenever seed 1 permutes
+// TestPoisonsGlobalState ahead of it, and passes whenever it does not, at every
+// processor count. Ten replicates per cell, sixty configurations.
+func orderDependentResults(r *replayer) []runner.Result {
+	const perCell = 10
+	return results(
+		r.times(cfgP1Shuffled1, "orderfail.json", perCell),
+		r.times(cfgP2Shuffled1, "orderload2.json", perCell),
+		r.times(cfgP4Shuffled1, "orderload.json", perCell),
+		r.times(cfgP1, "singleproc.json", perCell),
+		r.times(cfgP2, "loadfail2.json", perCell),
+		r.times(cfgP4, "loadfail.json", perCell),
+	)
+}
+
+// loadDependentResults: TestLoadDependent fails at two and four processors and
+// passes at one, whatever the test order. Same sixty configurations.
+func loadDependentResults(r *replayer) []runner.Result { return orderDependentResults(r) }
+
+// probabilisticLoadResults: TestProbabilisticLoad fails at roughly 2% above one
+// processor and never at one processor, spread evenly across shuffled and
+// unshuffled configurations.
+//
+// Eight hundred configurations, because that is what 2% costs. The matrix
+// comment in internal/runner states the same thing from the other direction:
+// at --runs 20 nothing below about a third is visible.
+func probabilisticLoadResults(r *replayer) []runner.Result {
+	const perCell = 200
+	const failsPerLoadedCell = 4 // 4/200 = 2%
+	return results(
+		r.times(cfgP1, "probload-p1.json", perCell),
+		r.times(cfgP1Shuffled1, "probload-p1-shuffled.json", perCell),
+		r.times(cfgP4, "probload-p4-fail.json", failsPerLoadedCell),
+		r.times(cfgP4, "probload-p4-pass.json", perCell-failsPerLoadedCell),
+		r.times(cfgP4Shuffled1, "probload-p4-shuffled-fail.json", failsPerLoadedCell),
+		r.times(cfgP4Shuffled1, "probload-p4-shuffled-pass.json", perCell-failsPerLoadedCell),
+	)
+}
+
+// oneFailureInSixtyResults: the same fixture, at the run count a person
+// actually types. One failure, sixty configurations, and nothing to say.
+func oneFailureInSixtyResults(r *replayer) []runner.Result {
+	const perCell = 15
+	return results(
+		r.times(cfgP1, "probload-p1.json", perCell),
+		r.times(cfgP1Shuffled1, "probload-p1-shuffled.json", perCell),
+		r.times(cfgP4, "probload-p4-fail.json", 1),
+		r.times(cfgP4, "probload-p4-pass.json", perCell-1),
+		r.times(cfgP4Shuffled1, "probload-p4-shuffled-pass.json", perCell),
+	)
+}
+
+// wildShapeResults is the shape the OLD matrix produced, with the failure rate
+// that was actually observed in the wild: sixty configurations of which 56 are
+// shuffled and 4 are not, and one failure.
+//
+// This is the fixture the previous classifier misclassifies. Its order rule
+// asked two questions - were all the failures shuffled, and did anything
+// unshuffled pass - and on this input both are yes, so it returned
+// order-dependent. Both remain yes here. What changed is that they are no
+// longer taken as evidence: one failure in 56 shuffled runs against none in 4
+// unshuffled ones is a difference two coin flips would supply.
+func wildShapeResults(r *replayer) []runner.Result {
+	return results(
+		r.times(cfgP4Shuffled1, "probload-p4-shuffled-fail.json", 1),
+		r.times(cfgP4Shuffled1, "probload-p4-shuffled-pass.json", 55),
+		r.times(cfgP4, "probload-p4-pass.json", 2),
+		r.times(cfgP1, "probload-p1.json", 2),
+	)
+}
+
+// TestClassifiesRecordedStreamsByRate is this version's exit criterion.
+//
+// Every case here is one the previous implementation got wrong, and the first
+// three of them are wrong in the same direction: it labelled them
+// order-dependent, because it asked whether every failure had been shuffled
+// rather than whether shuffling made failure more likely. The fourth is the one
+// it answered with a label where the honest answer is that sixty runs cannot
+// see a failure that happens 2% of the time.
+func TestClassifiesRecordedStreamsByRate(t *testing.T) {
+	tests := []struct {
+		name   string
+		build  func(*replayer) []runner.Result
+		test   string
+		want   Dependence
+		wantEv func(t *testing.T, ev Evidence)
+	}{
+		{
+			name:  "genuinely order-dependent, at every GOMAXPROCS",
+			build: orderDependentResults,
+			test:  "TestOrderDependent",
+			want:  DependenceOrder,
+			wantEv: func(t *testing.T, ev Evidence) {
+				wantRate(t, "shuffled", ev.Shuffled, 30, 30)
+				wantRate(t, "unshuffled", ev.Unshuffled, 0, 30)
+				// The load axis must stay silent: every processor count fails
+				// at the same rate, because what moves is the seed.
+				for _, p := range ev.ByGOMAXPROCS {
+					wantRate(t, p.Rate.Label, p.Rate, 10, 20)
+				}
+				if ev.LoadRises() {
+					t.Error("the load axis claims a rise where every processor count fails at 10/20")
+				}
+			},
+		},
+		{
+			name:  "genuinely load-dependent, deterministic threshold",
+			build: loadDependentResults,
+			test:  "TestLoadDependent",
+			want:  DependenceLoad,
+			wantEv: func(t *testing.T, ev Evidence) {
+				wantRate(t, "GOMAXPROCS=1", ev.LowestProcs(), 0, 20)
+				wantRate(t, "above GOMAXPROCS=1", ev.HigherProcs(), 40, 40)
+				if !ev.ProcsThreshold() {
+					t.Error("a clean threshold - nothing fails at one processor, everything fails above it - was not recognised as one")
+				}
+				// And the order axis must stay silent, even though half the
+				// failures were shuffled.
+				wantRate(t, "shuffled", ev.Shuffled, 20, 30)
+				wantRate(t, "unshuffled", ev.Unshuffled, 20, 30)
+				if ev.OrderRises() {
+					t.Error("the order axis claims a rise between two arms that fail at 20/30 apiece")
+				}
+			},
+		},
+		{
+			name:  "genuinely load-dependent, probabilistic at 2%",
+			build: probabilisticLoadResults,
+			test:  "TestProbabilisticLoad",
+			want:  DependenceLoad,
+			wantEv: func(t *testing.T, ev Evidence) {
+				wantRate(t, "GOMAXPROCS=1", ev.LowestProcs(), 0, 400)
+				wantRate(t, "above GOMAXPROCS=1", ev.HigherProcs(), 8, 400)
+				// THERE IS NO THRESHOLD HERE. Four processors both passes and
+				// fails, so the rule that survives from the old classifier
+				// cannot see this case at all; the rate comparison is what
+				// finds it.
+				if ev.ProcsThreshold() {
+					t.Error("a rate of 8/400 above the threshold was read as a clean threshold")
+				}
+				wantRate(t, "shuffled", ev.Shuffled, 4, 400)
+				wantRate(t, "unshuffled", ev.Unshuffled, 4, 400)
+				if ev.OrderRises() {
+					t.Error("the order axis claims a rise in a fixture whose runs contain one test, where no test order exists")
+				}
+			},
+		},
+		{
+			// The one the tool got wrong in the wild, reproduced exactly: a
+			// lopsided matrix, one failure, and the failure happened to land in
+			// the arm that holds 93% of the runs.
+			name:  "the old matrix's shape: one failure among 56 shuffled runs",
+			build: wildShapeResults,
+			test:  "TestProbabilisticLoad",
+			want:  DependenceUndetermined,
+			wantEv: func(t *testing.T, ev Evidence) {
+				wantRate(t, "shuffled", ev.Shuffled, 1, 56)
+				wantRate(t, "unshuffled", ev.Unshuffled, 0, 4)
+				// The old rule's premise, asserted rather than described: it
+				// holds here, and it is still not evidence. If this assertion
+				// ever fails, the fixture has stopped being the case that
+				// produced the wrong label.
+				if ev.Shuffled.Fail != ev.Shuffled.Fail+ev.Unshuffled.Fail {
+					t.Error("some failure was unshuffled; this is no longer the fixture the old rule claimed")
+				}
+				if ev.Unshuffled.Obs == ev.Unshuffled.Fail {
+					t.Error("no unshuffled run passed; this is no longer the fixture the old rule claimed")
+				}
+			},
+		},
+		{
+			name:  "one failure in sixty supports no claim at all",
+			build: oneFailureInSixtyResults,
+			test:  "TestProbabilisticLoad",
+			want:  DependenceUndetermined,
+			wantEv: func(t *testing.T, ev Evidence) {
+				wantRate(t, "GOMAXPROCS=1", ev.LowestProcs(), 0, 30)
+				wantRate(t, "above GOMAXPROCS=1", ev.HigherProcs(), 1, 30)
+				res, ok := ev.Resolution()
+				if !ok {
+					t.Fatal("sixty configurations resolved nothing at all, not even a bound")
+				}
+				// The bound has to be honest about the case above: this run
+				// could not have seen 2%, which is why it declines rather than
+				// concluding the test is order-independent or load-independent.
+				if res <= 0.02 {
+					t.Errorf("sixty configurations claim to resolve %.1f%%, which would have caught the 2%% fixture", res*100)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := Build(fixturePkg, cfgP4, tc.build(newReplayer(t)))
+			got := testByName(t, rep, tc.test)
+			if got.Class != ClassFlaky {
+				t.Fatalf("%s is %v, want flaky (%d passed, %d failed)", tc.test, got.Class, got.Pass, got.Fail)
+			}
+			if got.Dependence != tc.want {
+				t.Errorf("%s = %v, want %v\n  shuffled   %v\n  unshuffled %v\n  by procs   %v",
+					tc.test, got.Dependence, tc.want, got.Evidence.Shuffled, got.Evidence.Unshuffled, got.Evidence.ByGOMAXPROCS)
+			}
+			tc.wantEv(t, got.Evidence)
+		})
+	}
+}
+
+func wantRate(t *testing.T, name string, got Rate, fail, obs int) {
+	t.Helper()
+	if got.Fail != fail || got.Obs != obs {
+		t.Errorf("%s = %d/%d, want %d/%d", name, got.Fail, got.Obs, fail, obs)
+	}
+}
+
+// TestProbabilisticLoadIsInvisibleToAThreshold states the difference between
+// the two load fixtures in one assertion, because it is the difference the
+// whole rewrite turns on.
+//
+// The deterministic fixture has a clean threshold and the old rule could have
+// caught it, had the order rule not been checked first. The probabilistic one
+// has no threshold at all: four processors passes 196 times and fails 4 times,
+// so "every failure had strictly more processors than every pass" is false, and
+// no amount of reordering the old rules would have found it.
+func TestProbabilisticLoadIsInvisibleToAThreshold(t *testing.T) {
+	r := newReplayer(t)
+
+	deterministic := testByName(t, Build(fixturePkg, cfgP4, loadDependentResults(r)), "TestLoadDependent")
+	if !deterministic.Evidence.ProcsThreshold() {
+		t.Error("the deterministic fixture has a clean GOMAXPROCS threshold and the threshold rule missed it")
+	}
+
+	probabilistic := testByName(t, Build(fixturePkg, cfgP4, probabilisticLoadResults(r)), "TestProbabilisticLoad")
+	if probabilistic.Evidence.ProcsThreshold() {
+		t.Fatal("the probabilistic fixture has no threshold; reporting one means the rule is not reading the passes")
+	}
+	if probabilistic.Dependence != DependenceLoad {
+		t.Errorf("the probabilistic fixture = %v, want %v; it is only reachable through the rate comparison",
+			probabilistic.Dependence, DependenceLoad)
+	}
+}
+
+// TestSixtyRunsCannotSeeTwoPercent is the pair of fixtures read the other way
+// round: the same test, the same failure mechanism, and the only difference is
+// how many configurations were run.
+//
+// This is the assertion behind the sensitivity line the report prints. A tool
+// that said "undetermined" at sixty runs and "load-dependent" at eight hundred
+// without ever saying why would look like it was guessing in both.
+func TestSixtyRunsCannotSeeTwoPercent(t *testing.T) {
+	r := newReplayer(t)
+
+	short := testByName(t, Build(fixturePkg, cfgP4, oneFailureInSixtyResults(r)), "TestProbabilisticLoad")
+	long := testByName(t, Build(fixturePkg, cfgP4, probabilisticLoadResults(r)), "TestProbabilisticLoad")
+
+	if short.Dependence != DependenceUndetermined {
+		t.Errorf("sixty configurations produced %v; one failure is not evidence of anything", short.Dependence)
+	}
+	if long.Dependence != DependenceLoad {
+		t.Errorf("eight hundred configurations produced %v, want %v", long.Dependence, DependenceLoad)
+	}
+
+	shortRes, ok := short.Evidence.Resolution()
+	if !ok {
+		t.Fatal("the short run reported no resolution")
+	}
+	longRes, ok := long.Evidence.Resolution()
+	if !ok {
+		t.Fatal("the long run reported no resolution")
+	}
+	if !(longRes < 0.02 && shortRes > 0.02) {
+		t.Errorf("resolutions are %.1f%% at sixty runs and %.1f%% at eight hundred; "+
+			"the 2%% fixture must sit between them or the printed bound is not the truth about the run",
+			shortRes*100, longRes*100)
 	}
 }
 
@@ -761,9 +1391,11 @@ func TestWriteText(t *testing.T) {
 			wantContain: []string{
 				"FLAKY (2)",
 				"TestOrderDependent",
-				"order-dependent",
 				"TestLoadDependent",
-				"load-dependent",
+				// Three configurations name no knob, and the report says how
+				// blind it was rather than guessing.
+				"undetermined",
+				"too few observations on either axis",
 				"minimal repro: GOMAXPROCS=1 go test -shuffle=1 -count=1 " + fixturePkg,
 				"ALWAYS FAILS (1)",
 				"deterministic, not flaky",
@@ -814,6 +1446,272 @@ func TestWriteText(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestTextReportShowsTheEvidence: the label and the numbers behind it are
+// printed together. The bug this release fixes survived because nothing in the
+// output disagreed with the classifier - a reader had no way to notice that
+// "order-dependent" rested on one shuffled failure.
+func TestTextReportShowsTheEvidence(t *testing.T) {
+	rep := Build(fixturePkg, cfgP4, orderDependentResults(newReplayer(t)))
+	var b strings.Builder
+	if err := rep.WriteText(&b, false); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	got := b.String()
+
+	for _, want := range []string{
+		"order-dependent",
+		"shuffle:    30/30 (100%) shuffled, 0/30 (0%) unshuffled",
+		"GOMAXPROCS: 1: 10/20 (50%), 2: 10/20 (50%), 4: 10/20 (50%)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q:\n%s", want, got)
+		}
+	}
+	// Nothing raced in this fixture, and an arm with no observations is not a
+	// measurement of zero.
+	if strings.Contains(got, "race:") {
+		t.Errorf("the report printed a race line for a run with no raced configurations:\n%s", got)
+	}
+}
+
+// TestWriteEvidence is the renderer on its own, including the arms that are
+// absent. Each row differs from the one above it in one axis.
+func TestWriteEvidence(t *testing.T) {
+	tests := []struct {
+		name        string
+		ev          Evidence
+		wantContain []string
+		wantAbsent  []string
+	}{
+		{
+			name: "all three axes observed",
+			ev: Evidence{
+				Shuffled:     Rate{Fail: 3, Obs: 28},
+				Unshuffled:   Rate{Fail: 0, Obs: 28},
+				ByGOMAXPROCS: []ProcsRate{{GOMAXPROCS: 1, Rate: Rate{Fail: 0, Obs: 20}}, {GOMAXPROCS: 4, Rate: Rate{Fail: 3, Obs: 36}}},
+				Raced:        Rate{Fail: 1, Obs: 8},
+				Unraced:      Rate{Fail: 2, Obs: 48},
+			},
+			wantContain: []string{
+				"shuffle:    3/28 (11%) shuffled, 0/28 (0%) unshuffled",
+				"GOMAXPROCS: 1: 0/20 (0%), 4: 3/36 (8%)",
+				"race:       1/8 (12%) with -race, 2/48 (4%) without",
+			},
+		},
+		{
+			name: "nothing raced",
+			ev: Evidence{
+				Shuffled:     Rate{Fail: 3, Obs: 28},
+				Unshuffled:   Rate{Fail: 0, Obs: 28},
+				ByGOMAXPROCS: []ProcsRate{{GOMAXPROCS: 1, Rate: Rate{Fail: 3, Obs: 56}}},
+				Unraced:      Rate{Fail: 3, Obs: 56},
+			},
+			wantContain: []string{"shuffle:", "GOMAXPROCS: 1: 3/56 (5%)"},
+			wantAbsent:  []string{"race:"},
+		},
+		{
+			name:       "no observations at all",
+			ev:         Evidence{},
+			wantAbsent: []string{"shuffle:", "GOMAXPROCS:", "race:"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var b strings.Builder
+			writeEvidence(&b, tc.ev)
+			got := b.String()
+			for _, want := range tc.wantContain {
+				if !strings.Contains(got, want) {
+					t.Errorf("output missing %q:\n%s", want, got)
+				}
+			}
+			for _, absent := range tc.wantAbsent {
+				if strings.Contains(got, absent) {
+					t.Errorf("output unexpectedly contains %q:\n%s", absent, got)
+				}
+			}
+		})
+	}
+}
+
+// TestJSONEvidence pins the new schema. It lands now because the schema freezes
+// at v1.0.0 and additions are only free before then (CLAUDE.md rule 3).
+func TestJSONEvidence(t *testing.T) {
+	rep := Build(fixturePkg, cfgP4, orderDependentResults(newReplayer(t)))
+	b, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var doc struct {
+		Tests []struct {
+			Name           string           `json:"name"`
+			Classification string           `json:"classification"`
+			Dependence     string           `json:"dependence"`
+			Evidence       *json.RawMessage `json:"evidence"`
+		} `json:"tests"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	var flaky, clean int
+	for _, e := range doc.Tests {
+		if e.Classification == "flaky" {
+			flaky++
+			if e.Evidence == nil {
+				t.Errorf("%s is flaky and carries no evidence", e.Name)
+			}
+			continue
+		}
+		clean++
+		// Evidence appears exactly where dependence does. A test that never
+		// failed has no rates to show, and emitting zeros for it would invite a
+		// consumer to plot them.
+		if e.Evidence != nil {
+			t.Errorf("%s is %s and carries evidence", e.Name, e.Classification)
+		}
+	}
+	if flaky == 0 || clean == 0 {
+		t.Fatalf("the fixture report has %d flaky and %d non-flaky tests; both are needed here", flaky, clean)
+	}
+
+	var full struct {
+		Tests []struct {
+			Name     string `json:"name"`
+			Evidence *struct {
+				Shuffled     wireRateDoc `json:"shuffled"`
+				Unshuffled   wireRateDoc `json:"unshuffled"`
+				ByGOMAXPROCS []struct {
+					GOMAXPROCS int     `json:"gomaxprocs"`
+					Fail       int     `json:"fail"`
+					Obs        int     `json:"observations"`
+					Rate       float64 `json:"rate"`
+				} `json:"by_gomaxprocs"`
+				Raced                  wireRateDoc `json:"raced"`
+				Unraced                wireRateDoc `json:"unraced"`
+				SmallestResolvableRate *float64    `json:"smallest_resolvable_rate"`
+			} `json:"evidence"`
+		} `json:"tests"`
+	}
+	if err := json.Unmarshal(b, &full); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, e := range full.Tests {
+		if e.Name != "TestOrderDependent" {
+			continue
+		}
+		ev := e.Evidence
+		if ev == nil {
+			t.Fatal("TestOrderDependent carries no evidence")
+		}
+		if ev.Shuffled.Fail != 30 || ev.Shuffled.Obs != 30 || ev.Shuffled.Rate != 1 {
+			t.Errorf("shuffled = %+v, want 30/30 at rate 1", ev.Shuffled)
+		}
+		if ev.Unshuffled.Fail != 0 || ev.Unshuffled.Obs != 30 || ev.Unshuffled.Rate != 0 {
+			t.Errorf("unshuffled = %+v, want 0/30 at rate 0", ev.Unshuffled)
+		}
+		if len(ev.ByGOMAXPROCS) != 3 {
+			t.Fatalf("by_gomaxprocs = %+v, want three entries", ev.ByGOMAXPROCS)
+		}
+		for i, want := range []int{1, 2, 4} {
+			if ev.ByGOMAXPROCS[i].GOMAXPROCS != want {
+				t.Errorf("by_gomaxprocs[%d] is %d, want %d ascending", i, ev.ByGOMAXPROCS[i].GOMAXPROCS, want)
+			}
+			if ev.ByGOMAXPROCS[i].Fail != 10 || ev.ByGOMAXPROCS[i].Obs != 20 {
+				t.Errorf("by_gomaxprocs[%d] = %d/%d, want 10/20", i, ev.ByGOMAXPROCS[i].Fail, ev.ByGOMAXPROCS[i].Obs)
+			}
+		}
+		if ev.Raced.Obs != 0 || ev.Unraced.Obs != 60 {
+			t.Errorf("race arms = %+v and %+v, want nothing raced and 60 unraced", ev.Raced, ev.Unraced)
+		}
+		if ev.SmallestResolvableRate == nil {
+			t.Error("smallest_resolvable_rate is null for a run of sixty configurations")
+		}
+		return
+	}
+	t.Fatal("TestOrderDependent missing from the JSON report")
+}
+
+type wireRateDoc struct {
+	Fail int     `json:"fail"`
+	Obs  int     `json:"observations"`
+	Rate float64 `json:"rate"`
+}
+
+// TestJSONEvidenceIsAdditive: every field a v0.2.0 consumer read is still
+// present and still means the same thing. The schema is a compatibility surface
+// from v1.0.0 and the habit starts before then, not after.
+func TestJSONEvidenceIsAdditive(t *testing.T) {
+	b, err := json.Marshal(fixtureReport(t))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, key := range []string{
+		"package", "configurations", "completed", "timed_out", "errored",
+		"build_failed", "exit_code", "base", "tests",
+	} {
+		if _, ok := doc[key]; !ok {
+			t.Errorf("report lost pre-v0.3.0 field %q", key)
+		}
+	}
+	for _, raw := range doc["tests"].([]any) {
+		entry := raw.(map[string]any)
+		for _, key := range []string{
+			"package", "name", "pass", "fail", "skip", "incomplete",
+			"failure_rate", "classification", "clusters",
+		} {
+			if _, ok := entry[key]; !ok {
+				t.Errorf("test entry %v lost pre-v0.3.0 field %q", entry["name"], key)
+			}
+		}
+	}
+}
+
+// TestJSONResolutionIsNullWhenNothingCouldBeResolved is the case the pointer
+// exists for. A consumer must be able to tell "this run could resolve 14%" from
+// "this run could resolve nothing", and a zero would say the opposite of what
+// it means.
+func TestJSONResolutionIsNullWhenNothingCouldBeResolved(t *testing.T) {
+	b, err := json.Marshal(fixtureReport(t)) // three configurations
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var doc struct {
+		Tests []struct {
+			Name     string `json:"name"`
+			Evidence *struct {
+				SmallestResolvableRate *float64 `json:"smallest_resolvable_rate"`
+			} `json:"evidence"`
+		} `json:"tests"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var seen bool
+	for _, e := range doc.Tests {
+		if e.Evidence == nil {
+			continue
+		}
+		seen = true
+		if e.Evidence.SmallestResolvableRate != nil {
+			t.Errorf("%s claims to resolve %.3f on three configurations",
+				e.Name, *e.Evidence.SmallestResolvableRate)
+		}
+	}
+	if !seen {
+		t.Fatal("no flaky test in the three-configuration report")
+	}
+	// And the field is present rather than omitted, so null is a value a
+	// consumer reads rather than an absence it has to infer.
+	if !strings.Contains(string(b), `"smallest_resolvable_rate":null`) {
+		t.Error("smallest_resolvable_rate was omitted rather than emitted as null")
 	}
 }
 

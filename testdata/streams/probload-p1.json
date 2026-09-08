@@ -1,0 +1,8 @@
+{"Time":"2026-09-07T05:50:51.010090322Z","Action":"start","Package":"github.com/AarinB1/flakescope/testdata/flakypkg"}
+{"Time":"2026-09-07T05:50:51.011870058Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestProbabilisticLoad"}
+{"Time":"2026-09-07T05:50:51.011895545Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestProbabilisticLoad","Output":"=== RUN   TestProbabilisticLoad\n"}
+{"Time":"2026-09-07T05:50:51.011922106Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestProbabilisticLoad","Output":"--- PASS: TestProbabilisticLoad (0.00s)\n"}
+{"Time":"2026-09-07T05:50:51.011926532Z","Action":"pass","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestProbabilisticLoad","Elapsed":0}
+{"Time":"2026-09-07T05:50:51.011931218Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Output":"PASS\n"}
+{"Time":"2026-09-07T05:50:51.012239289Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Output":"ok  \tgithub.com/AarinB1/flakescope/testdata/flakypkg\t0.002s\n"}
+{"Time":"2026-09-07T05:50:51.012269617Z","Action":"pass","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Elapsed":0.002}

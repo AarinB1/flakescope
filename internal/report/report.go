@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/AarinB1/flakescope/internal/gotest"
@@ -52,15 +54,21 @@ type Dependence int
 const (
 	// DependenceNone is used for tests that are not flaky.
 	DependenceNone Dependence = iota
-	// DependenceOrder: every failure had shuffle on and at least one
-	// unshuffled configuration passed. The test depends on what ran before it.
+	// DependenceOrder: the failure rate under shuffle is materially higher
+	// than the rate without it. The test depends on what ran before it.
 	DependenceOrder
-	// DependenceLoad: failures track the race detector or a GOMAXPROCS
-	// threshold rather than test order.
+	// DependenceLoad: the failure rate rises with GOMAXPROCS, or with the race
+	// detector.
 	DependenceLoad
-	// DependenceUnknown: the failures do not line up with any single knob.
-	// Saying so is better than picking the most likely-looking one.
-	DependenceUnknown
+	// DependenceBoth: both axes rise. The axes are evaluated independently and
+	// there is no reason a test cannot depend on both, so there is a label that
+	// says so rather than a priority order that hides one behind the other.
+	DependenceBoth
+	// DependenceUndetermined: the evidence does not support a claim on either
+	// axis - too few observations in an arm, or rates too close to separate
+	// from noise. A test that failed once in sixty configurations lands here,
+	// and that is the honest answer rather than the likeliest-looking label.
+	DependenceUndetermined
 )
 
 func (d Dependence) String() string {
@@ -69,11 +77,224 @@ func (d Dependence) String() string {
 		return "order-dependent"
 	case DependenceLoad:
 		return "load-dependent"
-	case DependenceUnknown:
+	case DependenceBoth:
+		return "order-and-load-dependent"
+	case DependenceUndetermined:
 		return "undetermined"
 	default:
 		return ""
 	}
+}
+
+// Rate is one arm of one axis: how many of that arm's observations failed.
+// Everything the classifier decides is decided by comparing two of these.
+type Rate struct {
+	// Label is how the arm is named in the report, e.g. "shuffled" or
+	// "GOMAXPROCS=4".
+	Label string
+	Fail  int
+	Obs   int
+}
+
+// Value is the failure rate, or zero for an arm nothing was observed in.
+func (r Rate) Value() float64 {
+	if r.Obs == 0 {
+		return 0
+	}
+	return float64(r.Fail) / float64(r.Obs)
+}
+
+// String is the form the report prints: the counts first, because 3/28 and
+// 300/2800 are the same rate and are not the same evidence.
+func (r Rate) String() string {
+	return fmt.Sprintf("%d/%d (%.0f%%)", r.Fail, r.Obs, r.Value()*100)
+}
+
+// ProcsRate is one GOMAXPROCS value's rate. The value is carried alongside the
+// rate rather than only inside its label, because the threshold rule compares
+// processor counts as numbers.
+type ProcsRate struct {
+	GOMAXPROCS int
+	Rate       Rate
+}
+
+// The comparison rule, in three numbers.
+//
+// These are the whole classifier. They are constants rather than options
+// because a threshold a user can turn down is a label a user can manufacture.
+const (
+	// minArmObservations is the fewest observations an arm may have and still
+	// take part in a comparison. Four is not a power calculation; it is the
+	// floor below which the arithmetic is meaningless whatever the rates are.
+	// The real limit on what a run can resolve is the resolution() figure the
+	// report prints, which is usually far above this.
+	minArmObservations = 4
+
+	// zThreshold is the pooled two-proportion z the difference between two arms
+	// must clear: two standard errors, or about a one-in-forty chance of
+	// arising from sampling alone.
+	//
+	// A normal approximation is coarse at these counts and it is the coarseness
+	// that recommends it here: it is conservative for small samples, it is one
+	// expression a reader can check, and it needs nothing outside the standard
+	// library (CLAUDE.md rule 1).
+	zThreshold = 2.0
+
+	// rateRatio is the materiality bar. The higher arm must fail at least twice
+	// as often as the lower one, so that a difference which is statistically
+	// visible but practically nothing - 51% against 49% across ten thousand
+	// runs - is not reported as a dependence. An arm with no failures at all
+	// clears this trivially, which is the intended reading: 2% against 0% is a
+	// dependence, and 2% against 1.8% is not.
+	rateRatio = 2.0
+)
+
+// higherThan reports whether hi's failure rate is materially higher than lo's:
+// enough observations in both arms, a doubling of the rate, and a difference
+// that clears zThreshold.
+//
+// This is the function that replaces "every failure had shuffle on". That test
+// asked whether a configuration EVER produced a failure, which any lopsided
+// matrix answers yes to by chance; this one asks whether the arm fails more
+// OFTEN, which no sampling accident supplies.
+func higherThan(hi, lo Rate) bool {
+	if hi.Obs < minArmObservations || lo.Obs < minArmObservations {
+		return false
+	}
+	ph, pl := hi.Value(), lo.Value()
+	if ph <= pl || ph < pl*rateRatio {
+		return false
+	}
+	pooled := float64(hi.Fail+lo.Fail) / float64(hi.Obs+lo.Obs)
+	se := math.Sqrt(pooled * (1 - pooled) * (1/float64(hi.Obs) + 1/float64(lo.Obs)))
+	if se <= 0 {
+		return false
+	}
+	return (ph-pl)/se >= zThreshold
+}
+
+// resolution is the smallest failure rate the higher arm could have carried and
+// still been reported, given how many observations each arm actually got and a
+// lower arm that never failed.
+//
+// It is the number that turns "undetermined" from a shrug into a statement: a
+// run that could not have resolved anything below one in three has not shown
+// that a test failing at one in fifty is order-independent, and the report says
+// so in those words.
+//
+// It is found by counting rather than by inverting the z expression: the
+// smallest whole number of failures that would have cleared the rule is what a
+// run can actually observe, and no algebra can disagree with it.
+func resolution(hi, lo Rate) (float64, bool) {
+	if hi.Obs < minArmObservations || lo.Obs < minArmObservations {
+		return 0, false
+	}
+	for k := 1; k <= hi.Obs; k++ {
+		if higherThan(Rate{Fail: k, Obs: hi.Obs}, Rate{Fail: 0, Obs: lo.Obs}) {
+			return float64(k) / float64(hi.Obs), true
+		}
+	}
+	return 0, false
+}
+
+// Evidence is every rate the dependence label was read off, kept so the report
+// can print the basis next to the claim. A user who can see 3/28 against 0/28
+// can judge the classifier; a bare label asks them to trust it.
+type Evidence struct {
+	// The order axis.
+	Shuffled   Rate
+	Unshuffled Rate
+	// The load axis: one rate per GOMAXPROCS value, ascending, and the race
+	// detector's own two arms.
+	ByGOMAXPROCS []ProcsRate
+	Raced        Rate
+	Unraced      Rate
+}
+
+// LowestProcs is the control arm of the GOMAXPROCS axis, and HigherProcs is
+// every other candidate pooled.
+//
+// POOLED, NOT COMPARED ONE AT A TIME. Testing the lowest arm against each
+// higher arm separately would be three comparisons where the report makes one
+// claim, and three chances for noise to supply it. Pooling also degrades in the
+// right direction: a failure that needs two processors but not four still lifts
+// the pooled rate, just less.
+func (e Evidence) LowestProcs() Rate {
+	if len(e.ByGOMAXPROCS) == 0 {
+		return Rate{}
+	}
+	return e.ByGOMAXPROCS[0].Rate
+}
+
+func (e Evidence) HigherProcs() Rate {
+	if len(e.ByGOMAXPROCS) < 2 {
+		return Rate{}
+	}
+	out := Rate{Label: "GOMAXPROCS above " + strconv.Itoa(e.ByGOMAXPROCS[0].GOMAXPROCS)}
+	for _, p := range e.ByGOMAXPROCS[1:] {
+		out.Fail += p.Rate.Fail
+		out.Obs += p.Rate.Obs
+	}
+	return out
+}
+
+// ProcsThreshold is the strong case: every failure had strictly more processors
+// than every pass, so there is a clean threshold rather than a raised rate.
+//
+// It survives from the previous classifier, with the observation floor it never
+// had. Without that floor it is satisfied by one failure at four processors and
+// one pass at one processor, which is the shape of the bug this rewrite exists
+// to remove - a label handed out by construction.
+func (e Evidence) ProcsThreshold() bool {
+	if e.LowestProcs().Obs < minArmObservations || e.HigherProcs().Obs < minArmObservations {
+		return false
+	}
+	minFail, maxPass := 0, 0
+	for _, p := range e.ByGOMAXPROCS {
+		if p.Rate.Fail > 0 && (minFail == 0 || p.GOMAXPROCS < minFail) {
+			minFail = p.GOMAXPROCS
+		}
+		if p.Rate.Obs-p.Rate.Fail > 0 && p.GOMAXPROCS > maxPass {
+			maxPass = p.GOMAXPROCS
+		}
+	}
+	return minFail > 0 && maxPass > 0 && minFail > maxPass
+}
+
+// OrderRises: the failure rate is materially higher with shuffle on.
+func (e Evidence) OrderRises() bool { return higherThan(e.Shuffled, e.Unshuffled) }
+
+// LoadRises: the failure rate climbs with GOMAXPROCS - either as a clean
+// threshold or as a raised rate - or with the race detector.
+//
+// The race detector is on this axis rather than an axis of its own because what
+// it changes is how much of the schedule the runtime interleaves and inspects,
+// which is the same question GOMAXPROCS asks. A user told "load-dependent" and
+// shown 8/60 raced against 0/500 unraced has what they need.
+func (e Evidence) LoadRises() bool {
+	return e.ProcsThreshold() ||
+		higherThan(e.HigherProcs(), e.LowestProcs()) ||
+		higherThan(e.Raced, e.Unraced)
+}
+
+// Resolution is the smallest failure rate this run could have resolved on
+// either axis, and whether any axis had the observations to resolve anything.
+// It is what the report prints beside an undetermined verdict.
+func (e Evidence) Resolution() (float64, bool) {
+	best, ok := 0.0, false
+	for _, pair := range [][2]Rate{
+		{e.Shuffled, e.Unshuffled},
+		{e.HigherProcs(), e.LowestProcs()},
+	} {
+		r, got := resolution(pair[0], pair[1])
+		if !got {
+			continue
+		}
+		if !ok || r < best {
+			best, ok = r, true
+		}
+	}
+	return best, ok
 }
 
 // Cluster is one group of a test's failures that share a normalized signature.
@@ -124,6 +345,10 @@ type Test struct {
 
 	Class      Classification
 	Dependence Dependence
+	// Evidence is the per-axis failure rates Dependence was read off. It is
+	// populated for flaky tests only, and it is what the report prints beside
+	// the label: a classifier that was wrong until today has to show its work.
+	Evidence Evidence
 
 	// Minimal is the fewest-knobs-from-default configuration that reproduced
 	// the failure. It is set only for flaky tests; for an always-failing test
@@ -278,7 +503,8 @@ func Build(pkg string, base runner.Config, results []runner.Result) Report {
 		e.Class = classify(*e)
 		e.Clusters = clusterFailures(base, e.failures)
 		if e.Class == ClassFlaky {
-			e.Dependence = dependence(*e)
+			e.Evidence = evidenceFor(*e)
+			e.Dependence = dependence(e.Evidence)
 			min := minimal(base, e.failedConfigs())
 			e.Minimal = &min
 		}
@@ -456,74 +682,91 @@ func clusterFailures(base runner.Config, failures []failure) []Cluster {
 	return out
 }
 
-// dependence works out which knob a flaky test's failures track.
+// evidenceFor tallies a flaky test's observations into one rate per arm of each
+// axis. It is the whole input to the classifier: everything below is a
+// comparison between two of these rates, and nothing else about a run reaches
+// the label.
+func evidenceFor(t Test) Evidence {
+	ev := Evidence{
+		Shuffled:   Rate{Label: "shuffled"},
+		Unshuffled: Rate{Label: "unshuffled"},
+		Raced:      Rate{Label: "-race"},
+		Unraced:    Rate{Label: "no -race"},
+	}
+	byProcs := make(map[int]*Rate)
+
+	observe := func(c runner.Config, failed bool) {
+		add := func(r *Rate) {
+			r.Obs++
+			if failed {
+				r.Fail++
+			}
+		}
+		if c.Shuffled() {
+			add(&ev.Shuffled)
+		} else {
+			add(&ev.Unshuffled)
+		}
+		if c.Race {
+			add(&ev.Raced)
+		} else {
+			add(&ev.Unraced)
+		}
+		r, ok := byProcs[c.GOMAXPROCS]
+		if !ok {
+			r = &Rate{Label: fmt.Sprintf("GOMAXPROCS=%d", c.GOMAXPROCS)}
+			byProcs[c.GOMAXPROCS] = r
+		}
+		add(r)
+	}
+
+	for _, f := range t.failures {
+		observe(f.config, true)
+	}
+	for _, c := range t.passedIn {
+		observe(c, false)
+	}
+
+	// Ascending, so the first entry is the control arm. Map iteration order is
+	// randomised in Go, and an evidence table that printed its rows in a
+	// different order on two runs of the same matrix would be undiffable.
+	ev.ByGOMAXPROCS = make([]ProcsRate, 0, len(byProcs))
+	for procs, r := range byProcs {
+		ev.ByGOMAXPROCS = append(ev.ByGOMAXPROCS, ProcsRate{GOMAXPROCS: procs, Rate: *r})
+	}
+	sort.Slice(ev.ByGOMAXPROCS, func(i, j int) bool {
+		return ev.ByGOMAXPROCS[i].GOMAXPROCS < ev.ByGOMAXPROCS[j].GOMAXPROCS
+	})
+	return ev
+}
+
+// dependence reads the label off the evidence.
 //
-// Order is tested before load. A test whose failures ALL require shuffle, while
-// something unshuffled passed, depends on what ran before it; that is a
-// complete explanation, and GOMAXPROCS values among those shuffled runs are
-// then just noise. A load-dependent test fails under the unshuffled base too,
-// so it never reaches the order branch.
-func dependence(t Test) Dependence {
-	failedIn := t.failedConfigs()
-	if len(failedIn) == 0 || len(t.passedIn) == 0 {
-		return DependenceUnknown
-	}
-
-	allFailuresShuffled := true
-	for _, c := range failedIn {
-		if !c.Shuffled() {
-			allFailuresShuffled = false
-			break
-		}
-	}
-	anyUnshuffledPass := false
-	for _, c := range t.passedIn {
-		if !c.Shuffled() {
-			anyUnshuffledPass = true
-			break
-		}
-	}
-	if allFailuresShuffled && anyUnshuffledPass {
+// THE TWO AXES ARE EVALUATED INDEPENDENTLY AND NEITHER IS CHECKED FIRST. The
+// previous implementation asked "were all the failures shuffled, and did
+// something unshuffled pass?" before it asked anything about load, which made
+// the load rule unreachable for any test the order rule claimed. With a matrix
+// that ran 56 of 60 configurations shuffled, the order rule claimed nearly
+// everything: for a test that failed once, "all failures shuffled" held by
+// chance 56 times in 60, and an unshuffled pass was near-certain. Every flaky
+// test in two separate runs came back order-dependent, and one of them was
+// afterwards proved parallelism-dependent by hand.
+//
+// So: both axes are asked, both answers are reported, and a test that raises
+// both rates is labelled as depending on both rather than on whichever rule
+// happened to be written first.
+func dependence(ev Evidence) Dependence {
+	order, load := ev.OrderRises(), ev.LoadRises()
+	switch {
+	case order && load:
+		return DependenceBoth
+	case order:
 		return DependenceOrder
-	}
-
-	allFailuresRaced := true
-	for _, c := range failedIn {
-		if !c.Race {
-			allFailuresRaced = false
-			break
-		}
-	}
-	anyUnracedPass := false
-	for _, c := range t.passedIn {
-		if !c.Race {
-			anyUnracedPass = true
-			break
-		}
-	}
-	if allFailuresRaced && anyUnracedPass {
+	case load:
 		return DependenceLoad
+	default:
+		return DependenceUndetermined
 	}
-
-	// A GOMAXPROCS threshold: every failure had strictly more processors than
-	// every pass.
-	minFail := failedIn[0].GOMAXPROCS
-	for _, c := range failedIn {
-		if c.GOMAXPROCS < minFail {
-			minFail = c.GOMAXPROCS
-		}
-	}
-	maxPass := t.passedIn[0].GOMAXPROCS
-	for _, c := range t.passedIn {
-		if c.GOMAXPROCS > maxPass {
-			maxPass = c.GOMAXPROCS
-		}
-	}
-	if minFail > maxPass {
-		return DependenceLoad
-	}
-
-	return DependenceUnknown
 }
 
 // ---------------------------------------------------------------------------
@@ -565,6 +808,69 @@ type wireTest struct {
 	// consumer that has to distinguish "no clusters" from "field absent" is a
 	// consumer this schema has failed.
 	Clusters []wireCluster `json:"clusters"`
+	// Evidence is new in v0.3.0 and is the rate table the dependence label was
+	// read off. It is present exactly where "dependence" is - on flaky tests -
+	// because there is no evidence to show for a test that never failed.
+	//
+	// A consumer that only reads "dependence" reads this report as it read the
+	// last one. A consumer that wants to check the label can now do so.
+	Evidence *wireEvidence `json:"evidence,omitempty"`
+}
+
+// wireRate is one arm of one axis.
+type wireRate struct {
+	Fail int `json:"fail"`
+	Obs  int `json:"observations"`
+	// Rate is redundant with fail and observations, and is emitted anyway so
+	// that a consumer plotting rates does not have to decide what 0/0 means.
+	Rate float64 `json:"rate"`
+}
+
+type wireProcsRate struct {
+	GOMAXPROCS int     `json:"gomaxprocs"`
+	Fail       int     `json:"fail"`
+	Obs        int     `json:"observations"`
+	Rate       float64 `json:"rate"`
+}
+
+type wireEvidence struct {
+	Shuffled     wireRate        `json:"shuffled"`
+	Unshuffled   wireRate        `json:"unshuffled"`
+	ByGOMAXPROCS []wireProcsRate `json:"by_gomaxprocs"`
+	Raced        wireRate        `json:"raced"`
+	Unraced      wireRate        `json:"unraced"`
+	// SmallestResolvableRate is the lowest failure rate this run could have
+	// reported on any axis, and is null when no axis had the observations to
+	// resolve anything. It is not omitted when null: a consumer that has to
+	// tell "could not resolve" from "field absent" is a consumer this schema
+	// has failed.
+	SmallestResolvableRate *float64 `json:"smallest_resolvable_rate"`
+}
+
+func toWireRate(r Rate) wireRate {
+	return wireRate{Fail: r.Fail, Obs: r.Obs, Rate: r.Value()}
+}
+
+func toWireEvidence(ev Evidence) *wireEvidence {
+	w := &wireEvidence{
+		Shuffled:     toWireRate(ev.Shuffled),
+		Unshuffled:   toWireRate(ev.Unshuffled),
+		ByGOMAXPROCS: make([]wireProcsRate, 0, len(ev.ByGOMAXPROCS)),
+		Raced:        toWireRate(ev.Raced),
+		Unraced:      toWireRate(ev.Unraced),
+	}
+	for _, p := range ev.ByGOMAXPROCS {
+		w.ByGOMAXPROCS = append(w.ByGOMAXPROCS, wireProcsRate{
+			GOMAXPROCS: p.GOMAXPROCS,
+			Fail:       p.Rate.Fail,
+			Obs:        p.Rate.Obs,
+			Rate:       p.Rate.Value(),
+		})
+	}
+	if res, ok := ev.Resolution(); ok {
+		w.SmallestResolvableRate = &res
+	}
+	return w
 }
 
 // wireCluster is one group of failures sharing a normalized signature.
@@ -624,6 +930,9 @@ func (r Report) MarshalJSON() ([]byte, error) {
 			c := toWireConfig(*t.Minimal)
 			wt.Minimal = &c
 		}
+		if t.Class == ClassFlaky {
+			wt.Evidence = toWireEvidence(t.Evidence)
+		}
 		wt.Clusters = make([]wireCluster, 0, len(t.Clusters))
 		for _, c := range t.Clusters {
 			wt.Clusters = append(wt.Clusters, wireCluster{
@@ -680,6 +989,24 @@ func (r Report) WriteText(w io.Writer, verbose bool) error {
 				fmt.Fprintf(&b, ", %s", d)
 			}
 			b.WriteString("\n")
+			// THE EVIDENCE, NEXT TO THE LABEL. A reader who can see 3/28
+			// against 0/28 can judge the claim; a bare label asks them to
+			// trust a classifier that was wrong until today, and the way that
+			// bug survived was that nothing in the output disagreed with it.
+			writeEvidence(&b, t.Evidence)
+			// An undetermined verdict is only useful if it says how blind the
+			// run was. "We could not tell" and "we could not have told below
+			// one in three" are different sentences, and the second one names
+			// the --runs that would have answered.
+			if t.Dependence == DependenceUndetermined {
+				if res, ok := t.Evidence.Resolution(); ok {
+					fmt.Fprintf(&b, "      no axis separates these failures; %d configurations could not resolve a rate below %.0f%%\n",
+						r.Completed, res*100)
+				} else {
+					fmt.Fprintf(&b, "      too few observations on either axis to compare rates; %d configurations is not enough\n",
+						r.Completed)
+				}
+			}
 			if len(t.Clusters) > 1 {
 				writeClusters(&b, t, r.Package, verbose)
 				continue
@@ -765,6 +1092,27 @@ func writeClusters(b *strings.Builder, t Test, fallbackPkg string, verbose bool)
 				fmt.Fprintf(b, "        also: %s\n", cfg)
 			}
 		}
+	}
+}
+
+// writeEvidence prints one line per axis: the two arms of the shuffle axis, the
+// rate at each GOMAXPROCS value, and the race detector's two arms.
+//
+// The race line is omitted when nothing raced, rather than printed as 0/0.
+// An arm with no observations is not a measurement of zero.
+func writeEvidence(b *strings.Builder, ev Evidence) {
+	if ev.Shuffled.Obs > 0 || ev.Unshuffled.Obs > 0 {
+		fmt.Fprintf(b, "      shuffle:    %v shuffled, %v unshuffled\n", ev.Shuffled, ev.Unshuffled)
+	}
+	if len(ev.ByGOMAXPROCS) > 0 {
+		parts := make([]string, 0, len(ev.ByGOMAXPROCS))
+		for _, p := range ev.ByGOMAXPROCS {
+			parts = append(parts, fmt.Sprintf("%d: %v", p.GOMAXPROCS, p.Rate))
+		}
+		fmt.Fprintf(b, "      GOMAXPROCS: %s\n", strings.Join(parts, ", "))
+	}
+	if ev.Raced.Obs > 0 {
+		fmt.Fprintf(b, "      race:       %v with -race, %v without\n", ev.Raced, ev.Unraced)
 	}
 }
 

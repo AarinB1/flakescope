@@ -35,6 +35,23 @@ A test's failures are grouped by normalized signature, and each group carries
 its own minimal reproducing configuration: a test that fails two different ways
 has two of them, and reporting one command line for both would hide a bug.
 
+A flaky test is labelled by COMPARING FAILURE RATES between arms of an axis,
+and the rates are printed next to the label so the claim can be checked:
+
+  order-dependent            failed more often with -shuffle on than off
+  load-dependent             failed more often at higher GOMAXPROCS, or under
+                             the race detector
+  order-and-load-dependent   both
+  undetermined               neither difference is large enough to separate
+                             from noise at this many runs
+
+A comparison needs observations in both arms. At --runs 20 the smallest
+failure rate flakescope can tell from noise is about a third on the shuffle
+axis and a half on the GOMAXPROCS axis; a failure that reproduces 2% of the
+time needs --runs of about a thousand. When the answer is "undetermined" the
+report prints the rate this run could have resolved, so the next --runs is a
+number rather than a guess.
+
 Flags:
   --runs N          number of configurations to run (default 20)
   --json            emit the machine-readable report instead of text
