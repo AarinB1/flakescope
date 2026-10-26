@@ -499,40 +499,48 @@ func TestUsageDocumentsExitCodes(t *testing.T) {
 // so a bug in parseFlags cannot make this test agree with it.
 func TestNewRunnerCarriesParsedFlags(t *testing.T) {
 	tests := []struct {
-		name        string
-		args        []string
-		wantPkg     string
-		wantTimeout time.Duration
+		name            string
+		args            []string
+		wantPkg         string
+		wantTestTimeout time.Duration
+		wantTimeout     time.Duration
 	}{
 		{
-			name:        "the default timeout reaches the runner",
-			args:        []string{"./..."},
-			wantPkg:     "./...",
-			wantTimeout: 10 * time.Minute,
+			name:            "the default timeout reaches go test, and the kill waits past it",
+			args:            []string{"./..."},
+			wantPkg:         "./...",
+			wantTestTimeout: 10 * time.Minute,
+			wantTimeout:     15 * time.Minute,
 		},
 		{
-			name:        "an explicit timeout reaches the runner",
-			args:        []string{"--timeout", "45s", "./internal/queue"},
-			wantPkg:     "./internal/queue",
-			wantTimeout: 45 * time.Second,
+			name:            "an explicit timeout reaches go test",
+			args:            []string{"--timeout", "45s", "./internal/queue"},
+			wantPkg:         "./internal/queue",
+			wantTestTimeout: 45 * time.Second,
+			wantTimeout:     45*time.Second + 5*time.Minute,
 		},
 		{
-			name:        "a sub-second timeout is not rounded away",
-			args:        []string{"--timeout", "250ms", "example.com/x/y"},
-			wantPkg:     "example.com/x/y",
-			wantTimeout: 250 * time.Millisecond,
+			name:            "a sub-second timeout is not rounded away",
+			args:            []string{"--timeout", "250ms", "example.com/x/y"},
+			wantPkg:         "example.com/x/y",
+			wantTestTimeout: 250 * time.Millisecond,
+			wantTimeout:     250*time.Millisecond + 5*time.Minute,
 		},
 		{
-			name:        "zero means no per-configuration deadline, not the default one",
-			args:        []string{"--timeout", "0", "./pkg"},
-			wantPkg:     "./pkg",
-			wantTimeout: 0,
+			// No grace is added to zero. A deadline of five minutes is not "no
+			// deadline", and go test's own default still ends a hang.
+			name:            "zero means no per-configuration deadline, not the default one",
+			args:            []string{"--timeout", "0", "./pkg"},
+			wantPkg:         "./pkg",
+			wantTestTimeout: 0,
+			wantTimeout:     0,
 		},
 		{
-			name:        "flags that are not the runner's do not disturb it",
-			args:        []string{"--runs", "1000", "--json", "--verbose", "--timeout", "1m", "./pkg"},
-			wantPkg:     "./pkg",
-			wantTimeout: time.Minute,
+			name:            "flags that are not the runner's do not disturb it",
+			args:            []string{"--runs", "1000", "--json", "--verbose", "--timeout", "1m", "./pkg"},
+			wantPkg:         "./pkg",
+			wantTestTimeout: time.Minute,
+			wantTimeout:     6 * time.Minute,
 		},
 	}
 
@@ -548,8 +556,12 @@ func TestNewRunnerCarriesParsedFlags(t *testing.T) {
 				t.Errorf("runner.Package = %q, want %q; `go test` would be pointed at the wrong package",
 					r.Package, tc.wantPkg)
 			}
+			if r.TestTimeout != tc.wantTestTimeout {
+				t.Errorf("runner.TestTimeout = %v, want %v; --timeout is not reaching go test",
+					r.TestTimeout, tc.wantTestTimeout)
+			}
 			if r.Timeout != tc.wantTimeout {
-				t.Errorf("runner.Timeout = %v, want %v; --timeout is not reaching the runner",
+				t.Errorf("runner.Timeout = %v, want %v; the process-group kill must wait past go test's own timeout",
 					r.Timeout, tc.wantTimeout)
 			}
 			if r.Dir != "" {

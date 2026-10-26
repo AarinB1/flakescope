@@ -55,7 +55,8 @@ number rather than a guess.
 Flags:
   --runs N          number of configurations to run (default 20)
   --json            emit the machine-readable report instead of text
-  --timeout D       per-configuration timeout (default 10m)
+  --timeout D       passed to go test as -timeout (default 10m); a test
+                    still running when it fires is reported as timed out
   --verbose         list every configuration behind each failure group
 
 Exit codes:
@@ -86,10 +87,9 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	var opts options
 	fs.IntVar(&opts.runs, "runs", 20, "number of configurations to run")
 	fs.BoolVar(&opts.jsonOut, "json", false, "emit the machine-readable report")
-	// The default matches `go test`'s own 10 minute timeout, so flakescope does
-	// not kill runs the go tool would have let finish and then report them as
-	// timeouts of its own making.
-	fs.DurationVar(&opts.timeout, "timeout", 10*time.Minute, "per-configuration timeout")
+	// The default is `go test`'s own 10 minute timeout, so passing it through
+	// changes nothing for a package the go tool would have let finish.
+	fs.DurationVar(&opts.timeout, "timeout", 10*time.Minute, "passed to go test as -timeout")
 	fs.BoolVar(&opts.verbose, "verbose", false, "list every configuration behind each failure group")
 
 	if err := fs.Parse(args); err != nil {
@@ -133,11 +133,31 @@ type executor func(ctx context.Context, opts options, configs []runner.Config) [
 // Dir is deliberately left at its zero value, which means the caller's working
 // directory. flakescope resolves the package the same way the user's own
 // `go test` would.
+//
+// --timeout goes to `go test`, and flakescope's own kill waits killGrace past
+// it. The order matters: go test's timeout panics with a banner naming the
+// tests that hung, and flakescope's SIGKILL leaves nothing behind but a
+// configuration with no evidence. A kill that fired first would turn every
+// hang back into that.
 func newRunner(opts options) *runner.Runner {
 	r := runner.New(opts.pkg)
-	r.Timeout = opts.timeout
+	r.TestTimeout = opts.timeout
+	if opts.timeout > 0 {
+		r.Timeout = opts.timeout + killGrace
+	}
 	return r
 }
+
+// killGrace is how long flakescope waits past --timeout before it kills a
+// configuration's process group.
+//
+// It has to cover what go test's -timeout does not: building the test binary,
+// which happens before the test timer starts, and the minute go test itself
+// waits for a binary that has panicked to exit before it kills it. Five
+// minutes leaves four for the build. A build slower than that still ends in
+// the kill, and the report counts the configuration as killed rather than
+// hiding it.
+const killGrace = 5 * time.Minute
 
 func goTest(ctx context.Context, opts options, configs []runner.Config) []runner.Result {
 	return newRunner(opts).Run(ctx, configs)
