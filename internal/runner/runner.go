@@ -66,8 +66,24 @@ type Runner struct {
 	// Workers bounds how many configurations run at once. Zero means the
 	// default.
 	Workers int
-	// Timeout bounds each configuration individually. Zero means no timeout.
+	// Timeout bounds each configuration individually: when it fires, the whole
+	// process group is SIGKILLed. Zero means no timeout.
+	//
+	// It is a backstop, not the way a hung test is meant to be caught. A
+	// SIGKILL leaves a stream that stops wherever the kill landed, with nothing
+	// in it to say which test was stuck, so the configuration is reported as
+	// producing no evidence at all. TestTimeout is what catches a hang.
 	Timeout time.Duration
+	// TestTimeout is passed to `go test` as -timeout. When it fires, the
+	// testing package panics with a banner naming every test still running,
+	// and internal/gotest reads those tests as timed out. Zero passes no
+	// -timeout, which leaves go test's own default of ten minutes in force.
+	//
+	// It has to fire before Timeout does, or the banner never gets written.
+	// Timeout also covers building the test binary and go test's own grace
+	// period after the panic, and TestTimeout covers neither, so a caller that
+	// sets both should leave Timeout well above it.
+	TestTimeout time.Duration
 	// Dir is the working directory for `go test`. Zero means the caller's.
 	Dir string
 
@@ -184,9 +200,24 @@ func (r *Runner) runOne(ctx context.Context, cfg Config) Result {
 	return res
 }
 
+// args is the full `go` argument list for one configuration: the
+// configuration's own arguments, plus -timeout when TestTimeout is set.
+//
+// -timeout is the runner's and not the configuration's because it is not a
+// knob. It does not vary across the matrix, and a test that only passes under a
+// longer one is slow, not flaky.
+func (r *Runner) args(cfg Config) []string {
+	args := cfg.Args(r.Package)
+	if r.TestTimeout <= 0 {
+		return args
+	}
+	return append([]string{args[0], "-timeout=" + r.TestTimeout.String()}, args[1:]...)
+}
+
 // goTest is the one real implementation of the exec seam.
 func (r *Runner) goTest(ctx context.Context, cfg Config) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "go", cfg.Args(r.Package)...)
+	args := r.args(cfg)
+	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = r.Dir
 	cmd.Env = cfg.Env(os.Environ())
 	// CommandContext only SIGKILLs the `go` process. The test binary it
@@ -211,9 +242,9 @@ func (r *Runner) goTest(ctx context.Context, cfg Config) ([]byte, error) {
 	if err != nil {
 		msg := bytes.TrimSpace(stderr.Bytes())
 		if len(msg) > 0 {
-			return out, fmt.Errorf("go %v: %w: %s", cfg.Args(r.Package), err, msg)
+			return out, fmt.Errorf("go %v: %w: %s", args, err, msg)
 		}
-		return out, fmt.Errorf("go %v: %w", cfg.Args(r.Package), err)
+		return out, fmt.Errorf("go %v: %w", args, err)
 	}
 	return out, nil
 }
