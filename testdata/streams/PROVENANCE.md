@@ -29,6 +29,9 @@ command was run from the repository root with `P=./testdata/flakypkg/`.
 | `probload-p1-shuffled.json` | `GOMAXPROCS=1 go test -count=1 -json -shuffle=1 -run 'TestProbabilisticLoad$' $P` | One processor, shuffle on. |
 | `probload-p4-shuffled-pass.json` | `GOMAXPROCS=4 go test -count=1 -json -shuffle=1 -run 'TestProbabilisticLoad$' $P` | Four processors and shuffle on, on a run that passed. |
 | `probload-p4-shuffled-fail.json` | `GOMAXPROCS=4 go test -count=1 -json -shuffle=1 -run 'TestProbabilisticLoad$' $P` | The same configuration again, on a run that failed. |
+| `hang-p1.json` | `GOMAXPROCS=1 go test -tags flakescope_hang -count=1 -json -timeout=2s -run 'TestHangsUnderLoad$' $P` | The hanging fixture at one processor, where it does not hang and passes. |
+| `hang-p4.json` | `GOMAXPROCS=4 go test -tags flakescope_hang -count=1 -json -timeout=2s -run 'TestHangsUnderLoad$' $P` | The same fixture at four processors, where it hangs until `go test`'s own timeout panics. The test has no `pass` or `fail` event at all. |
+| `hang-subtest.json` | `GOMAXPROCS=1 go test -tags flakescope_hang -count=1 -json -timeout=2s -run 'TestHangsInSubtest$' $P` | A hang inside a subtest. The timeout banner names the parent and the subtest, and its output is attributed to the subtest only. |
 
 ## The build tag
 
@@ -39,6 +42,27 @@ under, and it is why the other recordings are unaffected by the panicking and
 racing fixtures: without it the package builds exactly as it did in v0.1.0. See
 the comment at the top of `crash_test.go` for why neither fixture can be part of
 the untagged matrix.
+
+## The timeout recordings
+
+`hang-p1.json`, `hang-p4.json` and `hang-subtest.json` were recorded with
+`-tags flakescope_hang`, which admits `testdata/flakypkg/hang_test.go`, and
+with `-timeout=2s`. Neither flag is a knob in flakescope's configuration
+matrix, and both are part of the command these were recorded under. The tag
+keeps two tests that never finish out of every other recording; the timeout is
+what ends them, and two seconds rather than flakescope's default only keeps
+re-recording fast. The banner reads `test timed out after 2s`, and the
+signature normalizes the duration away.
+
+What these three record is the shape of a Go 1.24 timeout, which is not the
+shape of any other failure. The testing package raises the timeout panic from
+its alarm goroutine, not from the test, so the test that hung never gets a
+`fail` event: the stream ends with the PACKAGE failing and the test still in
+flight. The only statement that the test timed out is the banner's
+`running tests:` list, which names every test still running at the deadline,
+parents of a hung subtest included. test2json attributes the whole banner to
+whichever of those tests was active last, so in `hang-subtest.json` the
+subtest carries it and its parent carries nothing but `=== RUN`.
 
 ## The mutated recording
 
