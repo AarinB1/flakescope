@@ -1,0 +1,8 @@
+{"Time":"2026-10-26T06:40:55.532847534Z","Action":"start","Package":"github.com/AarinB1/flakescope/testdata/flakypkg"}
+{"Time":"2026-10-26T06:40:55.536497832Z","Action":"run","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestHangsUnderLoad"}
+{"Time":"2026-10-26T06:40:55.536574933Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestHangsUnderLoad","Output":"=== RUN   TestHangsUnderLoad\n"}
+{"Time":"2026-10-26T06:40:55.536638131Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestHangsUnderLoad","Output":"--- PASS: TestHangsUnderLoad (0.00s)\n"}
+{"Time":"2026-10-26T06:40:55.536647561Z","Action":"pass","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Test":"TestHangsUnderLoad","Elapsed":0}
+{"Time":"2026-10-26T06:40:55.536654972Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Output":"PASS\n"}
+{"Time":"2026-10-26T06:40:55.536808881Z","Action":"output","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Output":"ok  \tgithub.com/AarinB1/flakescope/testdata/flakypkg\t0.003s\n"}
+{"Time":"2026-10-26T06:40:55.536854065Z","Action":"pass","Package":"github.com/AarinB1/flakescope/testdata/flakypkg","Elapsed":0.004}

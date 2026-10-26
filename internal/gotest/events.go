@@ -15,6 +15,13 @@
 // timed-out process leaves behind. Tests that were in flight when it stopped are
 // INCOMPLETE. They are never treated as passing: a tool that reports a crashed
 // run as green is worse than not running at all.
+//
+// One kind of in-flight test is not incomplete. When `go test -timeout` fires,
+// the testing package panics from its alarm goroutine rather than from the
+// test, so the test that hung never gets a pass or fail event: the stream ends
+// with the package failing and the test still in flight. The panic's banner
+// names every test that was still running, and those tests are TIMED OUT. See
+// attributeTimeouts.
 package gotest
 
 import (
@@ -79,6 +86,11 @@ const (
 	StatusPass
 	StatusFail
 	StatusSkip
+	// StatusTimedOut means `go test -timeout` fired while the test was running,
+	// on the testing package's own word: its timeout banner named the test. It
+	// is never inferred from the test merely being in flight when the stream
+	// ended.
+	StatusTimedOut
 )
 
 func (s Status) String() string {
@@ -89,6 +101,8 @@ func (s Status) String() string {
 		return "fail"
 	case StatusSkip:
 		return "skip"
+	case StatusTimedOut:
+		return "timeout"
 	default:
 		return "incomplete"
 	}
@@ -219,6 +233,7 @@ func Parse(r io.Reader) (*Run, error) {
 		}
 	}
 
+	run.attributeTimeouts()
 	return run, nil
 }
 
@@ -281,6 +296,99 @@ func applyTestScoped(pkg *Package, ev Event) {
 	// run, pause and cont only establish that the test exists, which the
 	// pkg.test call above already did. A test that never gets past them keeps
 	// the zero value, StatusIncomplete.
+}
+
+// timeoutBanner is the first line of the panic `go test -timeout` raises. The
+// lines after it, up to the first blank one, are the "running tests:" list.
+const timeoutBanner = "panic: test timed out after "
+
+// attributeTimeouts marks the tests a timeout banner names as timed out.
+//
+// THE BANNER'S LIST IS THE EVIDENCE, NOT ITS PLACEMENT. test2json attributes
+// output to whichever test was active last, so the banner lands on one test
+// even when it names several: a subtest's parent, or every parallel test still
+// running at the deadline. Marking only the test that owns the output would
+// leave the rest incomplete, so each test the list names is marked, and the
+// banner and everything after it is copied into the output of each named test
+// that does not already carry it. A test's output is what it is clustered by
+// and what the report prints, and a test reported as failed whose output is
+// "=== RUN" and nothing else gives the reader no reason.
+//
+// Three limits keep this narrow. The banner must be in a TEST's output: a
+// package-scoped banner stays with the package, under the same rule that keeps
+// every other package-scoped event out of tests. Only a test that is still
+// incomplete is marked, so a test that printed these words and then passed
+// keeps its pass. And only a test the list names is marked, so a test that was
+// in flight for some other reason stays incomplete.
+func (r *Run) attributeTimeouts() {
+	for _, pkg := range r.Packages {
+		for _, owner := range pkg.Tests {
+			if owner.Status != StatusIncomplete {
+				continue
+			}
+			tail, named := timeoutTail(owner.Output)
+			if tail == nil {
+				continue
+			}
+			for _, name := range named {
+				tst := pkg.Test(name)
+				if tst == nil || tst.Status != StatusIncomplete {
+					continue
+				}
+				tst.Status = StatusTimedOut
+				if tst != owner {
+					tst.Output = append(tst.Output, tail...)
+				}
+			}
+		}
+	}
+}
+
+// timeoutTail finds a timeout banner in a test's output. It returns the output
+// from the banner onwards and the test names its "running tests:" list gives,
+// or nil if the output holds no banner.
+//
+// The list's lines read "\t\tTestName (2s)". Test names cannot contain spaces,
+// because the testing package rewrites them to underscores, so the name is
+// everything before the last " (".
+func timeoutTail(output []string) ([]string, []string) {
+	start := -1
+	for i, line := range output {
+		if strings.HasPrefix(line, timeoutBanner) {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return nil, nil
+	}
+	tail := output[start:]
+
+	var named []string
+	inList := false
+	for _, line := range splitOutput(tail[1:]) {
+		t := strings.TrimSpace(line)
+		if !inList {
+			if t == "running tests:" {
+				inList = true
+			}
+			continue
+		}
+		if t == "" {
+			break
+		}
+		if i := strings.LastIndex(t, " ("); i > 0 {
+			t = t[:i]
+		}
+		named = append(named, t)
+	}
+	return tail, named
+}
+
+// splitOutput flattens output events into lines. An event usually carries one
+// line, but nothing in the stream guarantees it.
+func splitOutput(output []string) []string {
+	return strings.Split(strings.Join(output, ""), "\n")
 }
 
 // packageName resolves the package an event is about. Build events identify the

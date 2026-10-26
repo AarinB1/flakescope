@@ -1316,6 +1316,217 @@ func TestTimeoutsAndErrorsProduceNoEvidence(t *testing.T) {
 	}
 }
 
+// hangResults: TestHangsUnderLoad hangs until go test's -timeout ends it at
+// four processors, and passes at one. Ten replicates of each, every one
+// answered by a recording made under exactly that configuration.
+func hangResults(r *replayer) []runner.Result {
+	return results(
+		r.times(cfgP1, "hang-p1.json", 10),
+		r.times(cfgP4, "hang-p4.json", 10),
+	)
+}
+
+// TestHangsAreFailures is the fixture that breaks a report which counts a test
+// go test timed out as incomplete. That report calls TestHangsUnderLoad
+// never-fails, exits 0, and prints "No flaky tests found." for a test that hung
+// in half of its configurations.
+//
+// A timeout is a failure here because go test says so: it fails the package,
+// and its banner names the test. What flakescope does NOT count is a
+// configuration it had to kill itself, which leaves no such statement; see
+// TestTimeoutsAndErrorsProduceNoEvidence.
+func TestHangsAreFailures(t *testing.T) {
+	tests := []struct {
+		name         string
+		results      func(*replayer) []runner.Result
+		test         string
+		wantClass    Classification
+		wantDep      Dependence
+		wantPass     int
+		wantFail     int
+		wantTimeouts int
+		wantExit     int
+	}{
+		{
+			name:         "a hang under load is a load-dependent flaky test",
+			results:      hangResults,
+			test:         "TestHangsUnderLoad",
+			wantClass:    ClassFlaky,
+			wantDep:      DependenceLoad,
+			wantPass:     10,
+			wantFail:     10,
+			wantTimeouts: 10,
+			wantExit:     ExitFlaky,
+		},
+		{
+			name:         "a hang in every configuration always fails",
+			results:      func(r *replayer) []runner.Result { return r.times(cfgP1, "hang-subtest.json", 5) },
+			test:         "TestHangsInSubtest/inner",
+			wantClass:    ClassAlwaysFails,
+			wantDep:      DependenceNone,
+			wantFail:     5,
+			wantTimeouts: 5,
+			wantExit:     ExitClean,
+		},
+		{
+			// The parent the banner names but test2json did not give it to.
+			name:         "the parent of a hung subtest times out too",
+			results:      func(r *replayer) []runner.Result { return r.times(cfgP1, "hang-subtest.json", 5) },
+			test:         "TestHangsInSubtest",
+			wantClass:    ClassAlwaysFails,
+			wantDep:      DependenceNone,
+			wantFail:     5,
+			wantTimeouts: 5,
+			wantExit:     ExitClean,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := Build(fixturePkg, cfgP4, tc.results(newReplayer(t)))
+			got := testByName(t, rep, tc.test)
+			if got.Class != tc.wantClass {
+				t.Errorf("class = %v, want %v", got.Class, tc.wantClass)
+			}
+			if got.Dependence != tc.wantDep {
+				t.Errorf("dependence = %v, want %v", got.Dependence, tc.wantDep)
+			}
+			if got.Pass != tc.wantPass || got.Fail != tc.wantFail {
+				t.Errorf("pass/fail = %d/%d, want %d/%d", got.Pass, got.Fail, tc.wantPass, tc.wantFail)
+			}
+			if got.Timeouts != tc.wantTimeouts {
+				t.Errorf("timeouts = %d, want %d", got.Timeouts, tc.wantTimeouts)
+			}
+			if got.Incomplete != 0 {
+				t.Errorf("incomplete = %d, want 0; a test go test timed out did finish, by failing", got.Incomplete)
+			}
+			if code := rep.ExitCode(); code != tc.wantExit {
+				t.Errorf("ExitCode() = %d, want %d", code, tc.wantExit)
+			}
+			// What the report prints next to the repro has to say why it failed.
+			if len(got.Clusters) != 1 {
+				t.Fatalf("clusters = %d, want 1", len(got.Clusters))
+			}
+			if out := strings.Join(got.Clusters[0].Output, ""); !strings.Contains(out, "panic: test timed out after") {
+				t.Errorf("representative output does not show the timeout:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestTextReportNamesWhatDidNotFinish: every way a test can end a configuration
+// without a result is said in the text, because the JSON carrying a count is
+// not the same as a reader seeing it.
+func TestTextReportNamesWhatDidNotFinish(t *testing.T) {
+	tests := []struct {
+		name        string
+		results     func(*testing.T) []runner.Result
+		wantContain []string
+		wantAbsent  []string
+	}{
+		{
+			name: "timeouts are named on the flaky test",
+			results: func(t *testing.T) []runner.Result {
+				return hangResults(newReplayer(t))
+			},
+			wantContain: []string{
+				"FLAKY (1)",
+				"TestHangsUnderLoad",
+				"10 of these failures were go test timeouts",
+			},
+			wantAbsent: []string{"No flaky tests found."},
+		},
+		{
+			// truncated.json is a GOMAXPROCS=4 stream cut short, which is what
+			// a test binary killed from outside leaves when go test still exits
+			// with output. TestAlwaysPasses was in flight in it.
+			name: "a test that never failed but did not always finish is listed",
+			results: func(t *testing.T) []runner.Result {
+				r := newReplayer(t)
+				return results(r.times(cfgP4, "loadfail.json", 3), r.times(cfgP4, "truncated.json", 1))
+			},
+			wantContain: []string{
+				"DID NOT FINISH (1)",
+				"TestAlwaysPasses",
+				"did not finish in 1 configuration",
+			},
+		},
+		{
+			name: "a configuration flakescope killed is explained",
+			results: func(t *testing.T) []runner.Result {
+				return []runner.Result{
+					result(t, cfgSingleP, "allpass.json"),
+					{Config: cfgFourP, Outcome: runner.OutcomeTimedOut},
+				}
+			},
+			wantContain: []string{
+				"1 timed out",
+				"1 configuration outlived go test's own timeout and was killed",
+			},
+		},
+		{
+			name: "a clean run says nothing about any of it",
+			results: func(t *testing.T) []runner.Result {
+				return []runner.Result{result(t, cfgSingleP, "allpass.json")}
+			},
+			wantAbsent: []string{"DID NOT FINISH", "go test timeouts", "was killed"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := Build(fixturePkg, cfgP4, tc.results(t))
+			var b strings.Builder
+			if err := rep.WriteText(&b, false); err != nil {
+				t.Fatalf("WriteText: %v", err)
+			}
+			got := b.String()
+			for _, want := range tc.wantContain {
+				if !strings.Contains(got, want) {
+					t.Errorf("output missing %q:\n%s", want, got)
+				}
+			}
+			for _, absent := range tc.wantAbsent {
+				if strings.Contains(got, absent) {
+					t.Errorf("output unexpectedly contains %q:\n%s", absent, got)
+				}
+			}
+		})
+	}
+}
+
+// TestJSONTimeouts: "timeouts" is on every test, zero included, and counts a
+// subset of "fail".
+func TestJSONTimeouts(t *testing.T) {
+	rep := Build(fixturePkg, cfgP4, results(
+		hangResults(newReplayer(t)),
+		newReplayer(t).times(cfgP4, "loadfail.json", 1),
+	))
+	b, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var doc struct {
+		Tests []map[string]any `json:"tests"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := map[string]float64{"TestHangsUnderLoad": 10, "TestLoadDependent": 0}
+	for _, entry := range doc.Tests {
+		name := entry["name"].(string)
+		got, ok := entry["timeouts"].(float64)
+		if !ok {
+			t.Errorf("%s: timeouts = %v, want a number", name, entry["timeouts"])
+			continue
+		}
+		if got > entry["fail"].(float64) {
+			t.Errorf("%s: timeouts %v exceeds fail %v", name, got, entry["fail"])
+		}
+		if w, ok := want[name]; ok && got != w {
+			t.Errorf("%s: timeouts = %v, want %v", name, got, w)
+		}
+	}
+}
+
 // TestJSONSchema pins the field names. From v1.0.0 this is a compatibility
 // surface and changes must be additive (CLAUDE.md rule 3), so the names are
 // asserted rather than left to whatever the structs happen to be called.
@@ -1349,7 +1560,7 @@ func TestJSONSchema(t *testing.T) {
 		entry := raw.(map[string]any)
 		for _, key := range []string{
 			"package", "name", "pass", "fail", "skip", "incomplete",
-			"failure_rate", "classification",
+			"failure_rate", "classification", "timeouts",
 		} {
 			if _, ok := entry[key]; !ok {
 				t.Errorf("test entry %v is missing field %q", entry["name"], key)

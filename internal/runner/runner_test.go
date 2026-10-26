@@ -5,6 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -236,6 +239,68 @@ func TestRunStopsDispatchingWhenContextIsCancelled(t *testing.T) {
 	last := results[len(results)-1]
 	if last.Run != nil {
 		t.Error("an undispatched configuration came back with a parsed run")
+	}
+}
+
+// TestTestTimeoutReachesGoTest is the fixture that breaks a runner which keeps
+// TestTimeout to itself. Unless go test is given -timeout, a hung test runs
+// until flakescope's own deadline kills the process group, and a SIGKILL leaves
+// no banner naming the test that hung, so the hang reads as a configuration
+// that produced no evidence.
+//
+// It runs the real exec path against a shell script named `go` that records
+// its arguments and prints one event, so it does not invoke `go test`
+// (CLAUDE.md rule 2), and a goTest that built its own argument list without
+// the flag fails here.
+func TestTestTimeoutReachesGoTest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake go is a shell script")
+	}
+	cfg := Config{GOMAXPROCS: 2, ShuffleSeed: 3, Race: true, Count: 1}
+	tests := []struct {
+		name        string
+		testTimeout time.Duration
+		want        []string
+	}{
+		{
+			name:        "a test timeout is passed through",
+			testTimeout: 90 * time.Second,
+			want:        []string{"test", "-timeout=1m30s", "-json", "-count=1", "-race", "-shuffle=3", "example.com/pkg"},
+		},
+		{
+			// Zero leaves go test's own default in force, which is what the
+			// runner did before it had the field.
+			name: "zero passes nothing",
+			want: []string{"test", "-json", "-count=1", "-race", "-shuffle=3", "example.com/pkg"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			argsPath := filepath.Join(dir, "args")
+			script := "#!/bin/sh\n" +
+				"printf '%s\\n' \"$@\" > '" + argsPath + "'\n" +
+				"echo '{\"Action\":\"pass\",\"Package\":\"example.com/pkg\"}'\n"
+			if err := os.WriteFile(filepath.Join(dir, "go"), []byte(script), 0o755); err != nil {
+				t.Fatalf("writing fake go: %v", err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			r := New("example.com/pkg")
+			r.TestTimeout = tc.testTimeout
+			res := r.Run(context.Background(), []Config{cfg})[0]
+			if res.Outcome != OutcomeCompleted {
+				t.Fatalf("outcome = %v: %v", res.Outcome, res.Err)
+			}
+			b, err := os.ReadFile(argsPath)
+			if err != nil {
+				t.Fatalf("fake go recorded no arguments: %v", err)
+			}
+			got := strings.Fields(string(b))
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("go was run with %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

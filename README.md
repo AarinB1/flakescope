@@ -31,7 +31,7 @@ flakescope [flags] <package>
 | --- | --- | --- |
 | `--runs N` | 20 | number of configurations to run; see [Scale](#scale) |
 | `--json` | off | emit the machine-readable report instead of text |
-| `--timeout D` | 10m | per-configuration timeout |
+| `--timeout D` | 10m | passed to `go test` as `-timeout`; see [Hung tests](#hung-tests) |
 | `--verbose` | off | list every configuration behind each failure group |
 
 ```
@@ -150,11 +150,46 @@ So `got 1234, want 1000` and `got 7, want 1000` are reported separately. They
 are probably the same bug. The rule that merged them would also merge two that
 are not, and nothing would ever tell you.
 
-Two known limits, both on the splitting side. `go test -json` does not
-distinguish `t.Logf` output from `t.Errorf` output, so a failing test that also
-logs carries its log lines into its signature. And the race detector picks which
-of a racing pair to call the "Previous write", so one race can produce two
-different reports and land in two clusters.
+Two known limits on the splitting side. `go test -json` does not distinguish
+`t.Logf` output from `t.Errorf` output, so a failing test that also logs carries
+its log lines into its signature. And the race detector picks which of a racing
+pair to call the "Previous write", so one race can produce two different reports
+and land in two clusters.
+
+One known limit on the merging side, which is the side the rule above exists to
+avoid. A `go test` timeout panics from the testing package's alarm goroutine, so
+the stack its signature is read from is the alarm's, and it is the same wherever
+the test was stuck. Every timeout of one test is therefore one cluster, even if
+it hung in two different places. The representative output carries the whole
+goroutine dump, so the second place is in the report, but nothing separates it.
+
+**Hung tests.** A test that hangs in some configurations is flaky, and it is the
+kind of flaky test that never prints an assertion. `--timeout` is passed to
+`go test` as `-timeout`, so a hang ends in the testing package's own timeout
+panic, which names every test still running. Those tests are reported as
+FAILED, and each failure that was a timeout is counted and said so:
+
+```
+  TestDrainOnClose
+      failed 10/20 configurations (50%), load-dependent
+      10 of these failures were go test timeouts
+```
+
+flakescope's own deadline is a backstop that fires five minutes after
+`--timeout`, which leaves room for the build and for the minute `go test` itself
+waits for a panicked binary. A configuration it has to kill names no test, so it
+is counted nowhere, and the report says how many there were rather than letting
+"No flaky tests found" stand for them. A test that never failed but did not
+finish somewhere is listed under DID NOT FINISH rather than folded into "never
+failed". `--timeout 0` turns flakescope's deadline off and passes no `-timeout`,
+so `go test`'s own default of ten minutes still applies.
+
+Two things to know when acting on a timeout. `go test -timeout` bounds the whole
+test binary, not one test, so a package whose tests together outrun it will
+report whichever test was running at the deadline; a slow test and a hung one
+read the same, and the goroutine dump is how to tell them apart. And the minimal
+repro command does not carry `-timeout`, so rerunning it waits out `go test`'s
+default before the hang shows.
 
 **Minimal reproducing configuration.** Among the configurations that reproduced
 the failure, flakescope reports the smallest, ordered by:
@@ -232,7 +267,8 @@ still present and still populated.
           "minimal_config": { },             // as "base"; this cluster's own smallest
           "representative_output": ["..."]   // from minimal_config's run
         }
-      ]
+      ],
+      "timeouts": 0               // how many of "fail" were go test timeouts
     }
   ]
 }
@@ -248,6 +284,10 @@ Notes a consumer can rely on:
 - Every field that existed before v0.3.0 still means what it meant. `evidence`
   is additive, and a consumer that ignores it reads this report as it read the
   last one.
+- `timeouts` is new in v0.4.0, present on every test, and never more than
+  `fail`: a timeout is a failure. Before v0.4.0 a test `go test` timed out was
+  counted in `incomplete` and never reported as failing at all, so a consumer
+  comparing `fail` across that boundary will see hangs appear.
 - The `count` values across a test's clusters sum to that test's `fail`.
 - Clusters are ordered by descending `count`, then by `signature`. The same
   matrix always produces the same order.

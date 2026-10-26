@@ -334,14 +334,22 @@ type Test struct {
 	Name    string
 
 	// Pass and Fail count only configurations that produced evidence: runs
-	// that completed. A run that timed out or errored contributes to neither,
-	// because a deadline that fired says nothing about the test.
+	// that completed. A run flakescope had to kill, or that errored,
+	// contributes to neither, because a deadline that left nothing behind says
+	// nothing about the test.
 	Pass int
 	Fail int
 	// Skip and Incomplete are carried so the output can say why a test has
 	// fewer observations than there were configurations.
 	Skip       int
 	Incomplete int
+	// Timeouts is how many of the Fail configurations were go test's own
+	// -timeout firing while this test ran. They ARE failures, and are counted
+	// in Fail: go test fails the package, and its banner names the test. This
+	// is the difference from a configuration flakescope killed, which leaves
+	// no such statement and is counted nowhere. A hang is one of the commonest
+	// ways a test is flaky, and it is the one that never prints an assertion.
+	Timeouts int
 
 	Class      Classification
 	Dependence Dependence
@@ -483,8 +491,11 @@ func Build(pkg string, base runner.Config, results []runner.Result) Report {
 			case gotest.StatusPass:
 				e.Pass++
 				e.passedIn = append(e.passedIn, res.Config)
-			case gotest.StatusFail:
+			case gotest.StatusFail, gotest.StatusTimedOut:
 				e.Fail++
+				if t.Status == gotest.StatusTimedOut {
+					e.Timeouts++
+				}
 				e.failures = append(e.failures, failure{config: res.Config, output: t.Output})
 				if e.FailureOutput == nil {
 					e.FailureOutput = t.Output
@@ -815,6 +826,11 @@ type wireTest struct {
 	// A consumer that only reads "dependence" reads this report as it read the
 	// last one. A consumer that wants to check the label can now do so.
 	Evidence *wireEvidence `json:"evidence,omitempty"`
+	// Timeouts is new in v0.4.0: how many of "fail" were go test's own
+	// -timeout firing while the test ran. Always present, zero included, and
+	// never more than "fail". Before v0.4.0 those configurations were counted
+	// in "incomplete" instead, and the test was never reported as failing.
+	Timeouts int `json:"timeouts"`
 }
 
 // wireRate is one arm of one axis.
@@ -922,6 +938,7 @@ func (r Report) MarshalJSON() ([]byte, error) {
 			Fail:        t.Fail,
 			Skip:        t.Skip,
 			Incomplete:  t.Incomplete,
+			Timeouts:    t.Timeouts,
 			FailureRate: t.FailureRate(),
 			Class:       t.Class.String(),
 			Dependence:  t.Dependence.String(),
@@ -955,6 +972,16 @@ func (r Report) WriteText(w io.Writer, verbose bool) error {
 	fmt.Fprintf(&b, "flakescope %s\n", r.Package)
 	fmt.Fprintf(&b, "%d configurations: %d completed, %d timed out, %d errored\n",
 		r.Configurations, r.Completed, r.TimedOut, r.Errored)
+	// A configuration flakescope killed is the one kind of timeout that names
+	// no test. Saying how many there were is the most the report can do, and
+	// it must do at least that: otherwise "No flaky tests found" below reads
+	// as if those configurations had been measured.
+	switch {
+	case r.TimedOut == 1:
+		b.WriteString("  1 configuration outlived go test's own timeout and was killed; no test in it is counted\n")
+	case r.TimedOut > 1:
+		fmt.Fprintf(&b, "  %d configurations outlived go test's own timeout and were killed; no test in them is counted\n", r.TimedOut)
+	}
 
 	if r.BuildFailed {
 		if len(r.Tests) == 0 {
@@ -989,6 +1016,7 @@ func (r Report) WriteText(w io.Writer, verbose bool) error {
 				fmt.Fprintf(&b, ", %s", d)
 			}
 			b.WriteString("\n")
+			writeUnfinished(&b, t)
 			// THE EVIDENCE, NEXT TO THE LABEL. A reader who can see 3/28
 			// against 0/28 can judge the claim; a bare label asks them to
 			// trust a classifier that was wrong until today, and the way that
@@ -1034,6 +1062,7 @@ func (r Report) WriteText(w io.Writer, verbose bool) error {
 		fmt.Fprintf(&b, "\nALWAYS FAILS (%d) - deterministic, not flaky\n", len(broken))
 		for _, t := range broken {
 			fmt.Fprintf(&b, "  %s\n      failed %d/%d configurations\n", testID(t), t.Fail, t.Observations())
+			writeUnfinished(&b, t)
 			// A test that fails everywhere can still fail in two different
 			// ways, and the second one is invisible without this.
 			if len(t.Clusters) > 1 {
@@ -1048,6 +1077,29 @@ func (r Report) WriteText(w io.Writer, verbose bool) error {
 					}
 				}
 			}
+		}
+	}
+
+	// A test that never failed is not reported, unless it also failed to
+	// finish somewhere. Those runs are not passes, and a test that passed in
+	// seventeen configurations and was cut short in three has not been shown
+	// to be sound.
+	var unfinished []Test
+	for _, t := range r.byClass(ClassNeverFails) {
+		if t.Incomplete > 0 {
+			unfinished = append(unfinished, t)
+		}
+	}
+	if len(unfinished) > 0 {
+		fmt.Fprintf(&b, "\nDID NOT FINISH (%d) - never failed, but cut short in some configurations\n", len(unfinished))
+		for _, t := range unfinished {
+			fmt.Fprintf(&b, "  %s\n", testID(t))
+			// "passed 0/0" would read as a measurement. It is the absence of
+			// one, and the line below already says why.
+			if t.Observations() > 0 {
+				fmt.Fprintf(&b, "      passed %d/%d configurations it finished\n", t.Pass, t.Observations())
+			}
+			writeUnfinished(&b, t)
 		}
 	}
 
@@ -1113,6 +1165,21 @@ func writeEvidence(b *strings.Builder, ev Evidence) {
 	}
 	if ev.Raced.Obs > 0 {
 		fmt.Fprintf(b, "      race:       %v with -race, %v without\n", ev.Raced, ev.Unraced)
+	}
+}
+
+// writeUnfinished says how many of a test's failures were go test timeouts and
+// in how many configurations it never finished. Both are omitted at zero.
+func writeUnfinished(b *strings.Builder, t Test) {
+	switch {
+	case t.Timeouts == 1:
+		b.WriteString("      1 of these failures was a go test timeout\n")
+	case t.Timeouts > 1:
+		fmt.Fprintf(b, "      %d of these failures were go test timeouts\n", t.Timeouts)
+	}
+	if t.Incomplete > 0 {
+		fmt.Fprintf(b, "      did not finish in %d configuration%s, not counted above\n",
+			t.Incomplete, plural(t.Incomplete))
 	}
 }
 

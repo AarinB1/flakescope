@@ -121,6 +121,37 @@ func TestParseRecordedStreams(t *testing.T) {
 			wantTests:     map[string]Status{},
 		},
 		{
+			name:          "a test that does not hang passes",
+			stream:        "hang-p1.json",
+			wantPkgStatus: StatusPass,
+			wantTests: map[string]Status{
+				"TestHangsUnderLoad": StatusPass,
+			},
+		},
+		{
+			// The stream has no pass or fail event for this test at all. The
+			// timeout banner's "running tests:" list is the only thing in it
+			// that says what happened.
+			name:          "a hang ended by go test's own timeout",
+			stream:        "hang-p4.json",
+			wantPkgStatus: StatusFail,
+			wantTests: map[string]Status{
+				"TestHangsUnderLoad": StatusTimedOut,
+			},
+		},
+		{
+			// The banner names the parent and the subtest. test2json gives its
+			// output to the subtest only, so reading the owner of the banner
+			// alone would leave the parent incomplete.
+			name:          "a hang in a subtest times out the parent as well",
+			stream:        "hang-subtest.json",
+			wantPkgStatus: StatusFail,
+			wantTests: map[string]Status{
+				"TestHangsInSubtest":       StatusTimedOut,
+				"TestHangsInSubtest/inner": StatusTimedOut,
+			},
+		},
+		{
 			name:          "truncated stream leaves tests incomplete",
 			stream:        "truncated.json",
 			wantPkgStatus: StatusIncomplete,
@@ -227,6 +258,91 @@ func TestPackageScopedFailureDoesNotFailInFlightTest(t *testing.T) {
 	}
 	if got := strings.Join(pkg.Output, ""); !strings.Contains(got, "test timed out") {
 		t.Errorf("package-scoped output missing from the package: %q", got)
+	}
+}
+
+// TestTimeoutBannerReachesEveryTestItNames: a test the banner names but whose
+// output test2json gave to another test still has to say why it failed. The
+// report clusters and prints each test's own output, and a parent whose output
+// is "=== RUN" and nothing else would be reported as failing for no reason.
+func TestTimeoutBannerReachesEveryTestItNames(t *testing.T) {
+	tests := []struct {
+		name   string
+		stream string
+		test   string
+	}{
+		{"the test that owns the banner", "hang-p4.json", "TestHangsUnderLoad"},
+		{"the subtest that owns the banner", "hang-subtest.json", "TestHangsInSubtest/inner"},
+		{"the parent the banner names but does not belong to", "hang-subtest.json", "TestHangsInSubtest"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tst := parseStream(t, tc.stream).Package(fixturePkg).Test(tc.test)
+			if tst == nil {
+				t.Fatalf("test %q missing", tc.test)
+			}
+			got := strings.Join(tst.Output, "")
+			if n := strings.Count(got, "panic: test timed out after 2s"); n != 1 {
+				t.Errorf("banner appears %d times in the output, want once:\n%s", n, got)
+			}
+			if !strings.Contains(got, "running tests:") {
+				t.Errorf("output is missing the running-tests list:\n%s", got)
+			}
+		})
+	}
+}
+
+// TestTimeoutAttributionIsNarrow: only a test the banner names, and only one
+// still in flight, is marked as timed out. A test that already finished keeps
+// its result even if it printed the banner's words itself, and a banner that
+// test2json could not attribute to any test stays package-scoped, as
+// TestPackageScopedFailureDoesNotFailInFlightTest requires.
+func TestTimeoutAttributionIsNarrow(t *testing.T) {
+	tests := []struct {
+		name   string
+		stream string
+		want   map[string]Status
+	}{
+		{
+			name: "a finished test that printed the banner text keeps its result",
+			stream: `{"Action":"run","Package":"p","Test":"TestPrints"}
+{"Action":"output","Package":"p","Test":"TestPrints","Output":"panic: test timed out after 1s\n"}
+{"Action":"output","Package":"p","Test":"TestPrints","Output":"\trunning tests:\n"}
+{"Action":"output","Package":"p","Test":"TestPrints","Output":"\t\tTestPrints (1s)\n"}
+{"Action":"pass","Package":"p","Test":"TestPrints","Elapsed":0}
+{"Action":"pass","Package":"p","Elapsed":0}
+`,
+			want: map[string]Status{"TestPrints": StatusPass},
+		},
+		{
+			name: "an in-flight test the banner does not name stays incomplete",
+			stream: `{"Action":"run","Package":"p","Test":"TestNamed"}
+{"Action":"run","Package":"p","Test":"TestUnnamed"}
+{"Action":"output","Package":"p","Test":"TestNamed","Output":"panic: test timed out after 1s\n"}
+{"Action":"output","Package":"p","Test":"TestNamed","Output":"\trunning tests:\n"}
+{"Action":"output","Package":"p","Test":"TestNamed","Output":"\t\tTestNamed (1s)\n"}
+{"Action":"output","Package":"p","Test":"TestNamed","Output":"\n"}
+{"Action":"fail","Package":"p","Elapsed":1}
+`,
+			want: map[string]Status{"TestNamed": StatusTimedOut, "TestUnnamed": StatusIncomplete},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			run, err := ParseBytes([]byte(tc.stream))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			for name, want := range tc.want {
+				tst := run.Package("p").Test(name)
+				if tst == nil {
+					t.Fatalf("test %q missing", name)
+				}
+				if tst.Status != want {
+					t.Errorf("%s status = %v, want %v", name, tst.Status, want)
+				}
+			}
+		})
 	}
 }
 
